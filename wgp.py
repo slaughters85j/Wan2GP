@@ -46,6 +46,8 @@ from shared.utils.audio_video import extract_audio_tracks, combine_video_with_au
 from shared.utils.audio_video import append_sliding_window_audio, read_image_metadata, extract_audio_track_to_wav, write_wav_file, save_audio_file, get_audio_codec_extension, create_silent_wav_file
 from shared.utils.audio_metadata import read_audio_metadata, extract_creation_datetime_from_metadata, resolve_audio_creation_datetime
 from shared.utils.media_recording import record_file_metadata as shared_record_file_metadata
+from shared.utils import history_persistence as _history_persistence
+from shared.components import history_browser as _history_browser
 from shared.utils.virtual_media import get_virtual_image, get_virtual_media_vsource, parse_virtual_media_path, replace_virtual_media_source, strip_virtual_media_suffix
 from shared.match_archi import match_nvidia_architecture
 from shared.attention import get_attention_modes, get_supported_attention_modes
@@ -2785,6 +2787,10 @@ reload_needed = False
 save_path = server_config.get("save_path", os.path.join(os.getcwd(), "outputs"))
 image_save_path = server_config.get("image_save_path", os.path.join(os.getcwd(), "outputs"))
 audio_save_path = server_config.get("audio_save_path", save_path)
+try:
+    _history_persistence.init_history_store(save_path)
+except Exception as _exc:
+    print(f"[history_persistence] init failed: {_exc}")
 if not "video_output_codec" in server_config: server_config["video_output_codec"]= "libx264_8"
 if not "video_container" in server_config: server_config["video_container"]= "mp4"
 if not "embed_source_images" in server_config: server_config["embed_source_images"]= False
@@ -3892,7 +3898,7 @@ def finalize_generation(state):
     gen_in_progress = False
     gen["early_stop"] = False
     gen["early_stop_forwarded"] = False
-    return gallery_tabs, 1 if last_was_audio else 0, gr.update() if last_was_audio else gr.Gallery(selected_index=choice),  *pack_audio_gallery_state(audio_file_list, audio_choice), gr.Button(interactive=  True), gr.Button(interactive=  True, visible= False), gr.Button(visible= True), gr.Button(visible= False), gr.Column(visible= False), gr.HTML(visible= False, value="")
+    return gallery_tabs, 1 if last_was_audio else 0, gr.update() if last_was_audio else gr.Gallery(value=gen.get("file_list", []), selected_index=choice),  *pack_audio_gallery_state(audio_file_list, audio_choice), gr.Button(interactive=  True), gr.Button(interactive=  True, visible= False), gr.Button(visible= True), gr.Button(visible= False), gr.Column(visible= False), gr.HTML(visible= False, value="")
 
 def get_default_video_info():
     return "Please Select an Video / Image"    
@@ -5207,6 +5213,10 @@ def edit_video(
             with lock:
                 file_list.append(new_video_path)
                 file_settings_list.append(configs)
+            try:
+                _history_persistence.append_entry(new_video_path, configs, audio=False)
+            except Exception as _hp_exc:
+                print(f"[history_persistence] post-processing append hook failed: {_hp_exc}")
 
             if configs != None:
                 from shared.utils.video_metadata import extract_source_images, save_video_metadata
@@ -5609,7 +5619,21 @@ def get_output_filepath(file_path, is_image, audio_only):
 
 
 def record_file_metadata(video_path, configs, is_image, audio_only, gen, embedded_images=None, replace_last_file=False):
-    return shared_record_file_metadata(video_path, configs, is_image, audio_only, gen, get_processed_queue=get_processed_queue, metadata_choice=server_config.get("metadata_type", "metadata"), embedded_images=embedded_images, replace_last_file=replace_last_file, lock=lock, verbose_level=verbose_level)
+    result = shared_record_file_metadata(video_path, configs, is_image, audio_only, gen, get_processed_queue=get_processed_queue, metadata_choice=server_config.get("metadata_type", "metadata"), embedded_images=embedded_images, replace_last_file=replace_last_file, lock=lock, verbose_level=verbose_level)
+    try:
+        paths = [video_path] if not isinstance(video_path, list) else list(video_path)
+        for idx, path in enumerate(paths):
+            if not isinstance(path, str) or not path:
+                continue
+            if audio_only:
+                _history_persistence.append_entry(path, configs, audio=True)
+            elif replace_last_file and not is_image and idx == 0:
+                _history_persistence.replace_last_entry(path, configs, audio=False)
+            else:
+                _history_persistence.append_entry(path, configs, audio=False)
+    except Exception as _hp_exc:
+        print(f"[history_persistence] record_file_metadata hook failed: {_hp_exc}")
+    return result
 
 
 def generate_video(
@@ -8258,8 +8282,12 @@ def clear_deleted_files(state, audio_files):
             if os.path.isfile(file_path):
                 new_file_list.append(file_path)
                 new_file_settings_list.append(file_settings)
-        file_list[:]=new_file_list 
-        file_settings_list[:]=new_file_settings_list 
+        file_list[:]=new_file_list
+        file_settings_list[:]=new_file_settings_list
+    try:
+        _history_persistence.sync_from_lists(file_list, file_settings_list, audio=audio_files)
+    except Exception as _hp_exc:
+        print(f"[history_persistence] clear_deleted_files hook failed: {_hp_exc}")
 
 def eject_video_from_gallery(state, input_file_list, choice):
     gen = get_gen_info(state)
@@ -8276,6 +8304,10 @@ def eject_video_from_gallery(state, input_file_list, choice):
         file_settings_list[:] = file_settings_list[:choice]
         file_settings_list.extend(extend_list)
         choice = min(choice, len(file_list))
+    try:
+        _history_persistence.sync_from_lists(file_list, file_settings_list, audio=False)
+    except Exception as _hp_exc:
+        print(f"[history_persistence] eject_video hook failed: {_hp_exc}")
     return gr.Gallery(value = file_list, selected_index= choice), gr.update() if len(file_list) >0 else get_default_video_info(), gr.Row(visible= len(file_list) > 0)
 
 def eject_audio_from_gallery(state, input_file_list, choice):
@@ -8293,6 +8325,10 @@ def eject_audio_from_gallery(state, input_file_list, choice):
         file_settings_list[:] = file_settings_list[:choice]
         file_settings_list.extend(extend_list)
         choice = min(choice, len(file_list)-1)
+    try:
+        _history_persistence.sync_from_lists(file_list, file_settings_list, audio=True)
+    except Exception as _hp_exc:
+        print(f"[history_persistence] eject_audio hook failed: {_hp_exc}")
     return *pack_audio_gallery_state(file_list, choice), gr.update() if len(file_list) >0 else get_default_video_info(), gr.Row(visible= len(file_list) > 0)
 
 
@@ -8336,6 +8372,10 @@ def add_videos_to_gallery(state, input_file_list, choice, audio_files_paths, aud
                 new_video= True
                 file_list.append(file_path)
                 file_settings_list.append(file_settings)
+            try:
+                _history_persistence.append_entry(file_path, file_settings, audio=bool(audio_file))
+            except Exception as _hp_exc:
+                print(f"[history_persistence] add_videos_to_gallery hook failed: {_hp_exc}")
             valid_files_count +=1
 
     if valid_files_count== 0 and invalid_files_count ==0:
@@ -9625,6 +9665,21 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
         state_dict["last_resolution_per_group"] = server_config.get("last_resolution_per_group", {})
         gen = dict()
         gen["queue"] = []
+        try:
+            _persisted_video_paths, _persisted_video_settings = _history_persistence.load_entries(audio=False)
+            _persisted_audio_paths, _persisted_audio_settings = _history_persistence.load_entries(audio=True)
+        except Exception as _hp_exc:
+            print(f"[history_persistence] load_entries failed: {_hp_exc}")
+            _persisted_video_paths, _persisted_video_settings = [], []
+            _persisted_audio_paths, _persisted_audio_settings = [], []
+        gen["file_list"] = list(_persisted_video_paths)
+        gen["file_settings_list"] = list(_persisted_video_settings)
+        gen["audio_file_list"] = list(_persisted_audio_paths)
+        gen["audio_file_settings_list"] = list(_persisted_audio_settings)
+        if gen["file_list"]:
+            gen["selected"] = len(gen["file_list"]) - 1
+        if gen["audio_file_list"]:
+            gen["audio_selected"] = len(gen["audio_file_list"]) - 1
         state_dict["gen"] = gen
 
     def ui_get(key, default = None):
@@ -10857,13 +10912,20 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                 status_trigger = gr.Text(interactive= False, visible=False, elem_id="wangp_main_status_trigger" if main_bridge_elem_ids else None)
                 load_queue_trigger = gr.Text(interactive= False, visible=False, elem_id="wangp_main_load_queue_trigger" if main_bridge_elem_ids else None)
                 abort_client_id= gr.Text(interactive= False, visible=False, elem_id="wangp_main_abort_client_id" if main_bridge_elem_ids else None)
-                default_files = []
+                try:
+                    default_files = list(state_dict.get("gen", {}).get("file_list", []))
+                    default_audio_files = list(state_dict.get("gen", {}).get("audio_file_list", []))
+                except Exception as _hp_exc:
+                    print(f"[history_persistence] default gallery seed failed: {_hp_exc}")
+                    default_files = []
+                    default_audio_files = []
+                default_selected_video_index = max(len(default_files) - 1, 0) if default_files else 0
                 current_gallery_tab = gr.Number(0, visible=False)
                 with gr.Tabs() as gallery_tabs:
                     with gr.Tab("Video / Images Gallery", id="video_images"):
-                        output = gr.Gallery(value =default_files, label="Generated videos", preview= True, show_label=False, elem_id="gallery" , columns=[3], rows=[1], object_fit="contain", height=450, selected_index=0, interactive= False)
+                        output = gr.Gallery(value =default_files, label="Generated videos", preview= True, show_label=False, elem_id="gallery" , columns=[3], rows=[1], object_fit="contain", height=450, selected_index=default_selected_video_index, interactive= False)
                     with gr.Tab("Audio Files Gallery", id="audio"):
-                        output_audio = AudioGallery(audio_paths=[], max_thumbnails=999, height=40, update_only=update_form)
+                        output_audio = AudioGallery(audio_paths=default_audio_files, max_thumbnails=999, height=40, update_only=update_form)
                         audio_files_paths, audio_file_selected, audio_gallery_refresh_trigger = output_audio.get_state()
                 output_trigger = gr.Text(interactive= False, visible=False, elem_id="wangp_main_output_trigger" if main_bridge_elem_ids else None)
                 selected_video_time_input = gr.Text(interactive= False, visible=False, elem_id="selected_video_time_input" if main_bridge_elem_ids else None)
@@ -10976,6 +11038,15 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                         hidden_force_quit_trigger = gr.Button("force_quit", visible=False, elem_id="force_quit_btn_hidden")
                         hidden_countdown_state = gr.Number(value=-1, visible=False, elem_id="hidden_countdown_state_num")
                         single_hidden_trigger_btn = gr.Button("trigger_countdown", visible=False, elem_id="trigger_info_single_btn")
+                try:
+                    history_ui = _history_browser.build_ui(
+                        save_dir=save_path,
+                        missing_placeholder=os.path.join("icons", "missing_video.png"),
+                        accordion_label="Full History",
+                    )
+                except Exception as _hb_exc:
+                    print(f"[history_browser] build_ui failed: {_hb_exc}")
+                    history_ui = None
 
         extra_inputs = prompt_vars + [wizard_prompt, wizard_variables_var, wizard_prompt_activated_var, video_prompt_column, image_prompt_column, image_prompt_type_group, image_prompt_type_radio, image_prompt_type_endcheckbox,
                                       prompt_column_advanced, prompt_column_wizard_vars, prompt_column_wizard, alt_prompt_row, lset_name, save_lset_prompt_drop, advanced_row, speed_tab, audio_tab, mmaudio_col, quality_tab,
@@ -11107,7 +11178,10 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
             save_settings_btn.click( fn=validate_wizard_prompt, inputs =[state, wizard_prompt_activated_var, wizard_variables_var,  prompt, wizard_prompt, *prompt_vars] , outputs= [prompt]).then(
                 save_inputs, inputs =[target_settings] + gen_inputs, outputs = [])
 
-            gr.on( triggers=[video_info_extract_settings_btn.click, video_info_extract_image_settings_btn.click], fn=validate_wizard_prompt,
+            _extract_triggers = [video_info_extract_settings_btn.click, video_info_extract_image_settings_btn.click]
+            if history_ui is not None:
+                _extract_triggers.append(history_ui.extract_trigger.change)
+            gr.on( triggers=_extract_triggers, fn=validate_wizard_prompt,
                 inputs= [state, wizard_prompt_activated_var, wizard_variables_var,  prompt, wizard_prompt, *prompt_vars] ,
                 outputs= [prompt],
                 show_progress="hidden",
@@ -11177,8 +11251,13 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                     show_progress="hidden",
                 )
             gr.on(triggers=[video_info_eject_video_btn.click, video_info_eject_video2_btn.click, video_info_eject_video3_btn.click, video_info_eject_deleted_video_btn.click,  video_info_eject_image_btn.click], fn=eject_video_from_gallery, inputs =[state, output, last_choice], outputs = [output, video_info, video_buttons_row] )
-            video_info_to_control_video_btn.click(fn=video_to_control_video, inputs =[state, output, last_choice], outputs = [video_guide] )            
-            video_info_to_video_source_btn.click(fn=video_to_source_video, inputs =[state, output, last_choice], outputs = [video_source] )
+            _to_control_triggers = [video_info_to_control_video_btn.click]
+            _to_source_triggers = [video_info_to_video_source_btn.click]
+            if history_ui is not None:
+                _to_control_triggers.append(history_ui.to_control_trigger.change)
+                _to_source_triggers.append(history_ui.to_source_trigger.change)
+            gr.on(triggers=_to_control_triggers, fn=video_to_control_video, inputs =[state, output, last_choice], outputs = [video_guide] )
+            gr.on(triggers=_to_source_triggers, fn=video_to_source_video, inputs =[state, output, last_choice], outputs = [video_source] )
             video_info_to_start_image_btn.click(fn=image_to_ref_image_add, inputs =[state, output, last_choice, image_start, gr.State("Start Image")], outputs = [image_start] )
             video_info_to_end_image_btn.click(fn=image_to_ref_image_add, inputs =[state, output, last_choice, image_end, gr.State("End Image")], outputs = [image_end] )
             video_info_to_image_guide_btn.click(fn=image_to_ref_image_guide, inputs =[state, output, last_choice], outputs = [image_guide, image_mask_guide]).then(fn=None, inputs=[], outputs=[], js=click_brush_js )
@@ -11192,6 +11271,25 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
 
             video_info_postprocessing_btn.click(fn=apply_post_processing, inputs =[state, output, last_choice, PP_temporal_upsampling, PP_spatial_upsampling, PP_film_grain_intensity, PP_film_grain_saturation], outputs = [mode, generate_trigger, add_to_queue_trigger ] )
             video_info_remux_audio_btn.click(fn=remux_audio, inputs =[state, output, last_choice, PP_MMAudio_setting, PP_MMAudio_prompt, PP_MMAudio_neg_prompt, PP_MMAudio_seed, PP_repeat_generation, PP_custom_audio], outputs = [mode, generate_trigger, add_to_queue_trigger ] )
+            if history_ui is not None:
+                try:
+                    _history_browser.wire_events(
+                        history_ui,
+                        state=state,
+                        top_gallery=output,
+                        last_choice=last_choice,
+                        output_trigger=output_trigger,
+                        get_gen_info=get_gen_info,
+                    )
+                    main.load(
+                        fn=lambda: _history_browser.initial_render(history_ui),
+                        inputs=[],
+                        outputs=_history_browser.initial_render_outputs(history_ui),
+                        queue=False,
+                        show_progress="hidden",
+                    )
+                except Exception as _hb_exc:
+                    print(f"[history_browser] wire_events failed: {_hb_exc}")
             save_lset_btn.click(validate_save_lset, inputs=[state, lset_name], outputs=[apply_lset_btn, refresh_lora_btn, delete_lset_btn, save_lset_btn,confirm_save_lset_btn, cancel_lset_btn, save_lset_prompt_drop])
             delete_lset_btn.click(validate_delete_lset, inputs=[state, lset_name], outputs=[apply_lset_btn, refresh_lora_btn, delete_lset_btn, save_lset_btn,confirm_delete_lset_btn, cancel_lset_btn ])
             confirm_save_lset_btn.click(fn=validate_wizard_prompt, inputs =[state, wizard_prompt_activated_var, wizard_variables_var, prompt, wizard_prompt, *prompt_vars] , outputs= [prompt], show_progress="hidden",).then(
