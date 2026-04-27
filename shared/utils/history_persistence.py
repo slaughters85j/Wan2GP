@@ -30,6 +30,7 @@ _SCHEMA_VERSION = 2
 
 _lock = threading.Lock()
 _history_path: str | None = None
+_save_dir: str | None = None
 _loaded: bool = False
 _video_entries: list[dict[str, Any]] = []
 _audio_entries: list[dict[str, Any]] = []
@@ -42,13 +43,28 @@ def _log(msg: str) -> None:
         pass
 
 
+def _norm(path: Any) -> str:
+    """Canonical form for path equality. Stable across slash flavor and case
+    (on Windows). Returns "" for non-string inputs.
+    """
+    if not isinstance(path, str) or not path:
+        return ""
+    try:
+        p = os.path.normpath(path)
+    except Exception:
+        p = path
+    if os.name == "nt":
+        p = p.lower()
+    return p
+
+
 def init_history_store(save_dir: str | None) -> None:
     """Set the directory where the JSON lives and load existing entries.
 
     Safe to call multiple times; subsequent calls re-point the store only if
     the directory differs and reload from the new location.
     """
-    global _history_path, _loaded, _video_entries, _audio_entries
+    global _history_path, _save_dir, _loaded, _video_entries, _audio_entries
     with _lock:
         try:
             if save_dir is None:
@@ -61,6 +77,7 @@ def init_history_store(save_dir: str | None) -> None:
             if _loaded and new_path == _history_path:
                 return
             _history_path = new_path
+            _save_dir = save_dir
             _video_entries, _audio_entries = _read_from_disk(new_path)
             _loaded = True
         except Exception as exc:
@@ -73,6 +90,30 @@ def init_history_store(save_dir: str | None) -> None:
 
 def get_history_path() -> str | None:
     return _history_path
+
+
+def get_save_dir() -> str | None:
+    return _save_dir
+
+
+def reload_from_disk() -> tuple[int, int]:
+    """Force a re-read of the JSON from disk into module memory.
+
+    Returns ``(video_count, audio_count)`` after the reload. Used by the
+    Refresh button to ensure the UI sees the latest on-disk state even if
+    something outside this process touched the file.
+    """
+    global _video_entries, _audio_entries
+    with _lock:
+        if _history_path is None:
+            return (len(_video_entries), len(_audio_entries))
+        try:
+            v, a = _read_from_disk(_history_path)
+            _video_entries = v
+            _audio_entries = a
+        except Exception as exc:
+            _log(f"reload_from_disk failed: {exc}")
+        return (len(_video_entries), len(_audio_entries))
 
 
 def _normalize_entry(e: Any) -> dict[str, Any] | None:
@@ -194,12 +235,13 @@ def snapshot_entries(audio: bool = False) -> list[dict[str, Any]]:
 def append_entry(path: str, settings: Any, *, audio: bool = False) -> None:
     if not isinstance(path, str) or not path:
         return
+    target_norm = _norm(path)
     with _lock:
         try:
             entries = _entries_for(audio)
             safe_settings = settings if isinstance(settings, dict) else None
             for e in entries:
-                if e.get("path") == path:
+                if _norm(e.get("path")) == target_norm:
                     if safe_settings is not None:
                         e["settings"] = safe_settings
                     _write_to_disk_locked()
@@ -233,11 +275,12 @@ def remove_entry(path: str, *, audio: bool = False) -> None:
     """Remove the JSON entry only (does not touch the file on disk)."""
     if not isinstance(path, str) or not path:
         return
+    target_norm = _norm(path)
     with _lock:
         try:
             entries = _entries_for(audio)
             before = len(entries)
-            entries[:] = [e for e in entries if e.get("path") != path]
+            entries[:] = [e for e in entries if _norm(e.get("path")) != target_norm]
             if len(entries) != before:
                 _write_to_disk_locked()
         except Exception as exc:
@@ -253,12 +296,13 @@ def delete_entry(path: str, *, audio: bool = False, delete_file: bool = True, th
     """
     if not isinstance(path, str) or not path:
         return False
+    target_norm = _norm(path)
     removed = False
     with _lock:
         try:
             entries = _entries_for(audio)
             before = len(entries)
-            entries[:] = [e for e in entries if e.get("path") != path]
+            entries[:] = [e for e in entries if _norm(e.get("path")) != target_norm]
             removed = len(entries) != before
             if removed:
                 _write_to_disk_locked()
@@ -283,15 +327,18 @@ def toggle_favorite(path: str, *, audio: bool = False) -> bool:
     the entry was not found)."""
     if not isinstance(path, str) or not path:
         return False
+    target_norm = _norm(path)
     with _lock:
         try:
             entries = _entries_for(audio)
             for e in entries:
-                if e.get("path") == path:
+                if _norm(e.get("path")) == target_norm:
                     new_val = not bool(e.get("favorite", False))
                     e["favorite"] = new_val
                     _write_to_disk_locked()
+                    _log(f"toggle_favorite: {path!r} -> {new_val}")
                     return new_val
+            _log(f"toggle_favorite: no matching entry for {path!r} (norm={target_norm!r}); kept {len(entries)} entries unchanged")
         except Exception as exc:
             _log(f"toggle_favorite failed for {path!r}: {exc}")
     return False
@@ -300,16 +347,83 @@ def toggle_favorite(path: str, *, audio: bool = False) -> bool:
 def set_favorite(path: str, value: bool, *, audio: bool = False) -> None:
     if not isinstance(path, str) or not path:
         return
+    target_norm = _norm(path)
     with _lock:
         try:
             entries = _entries_for(audio)
             for e in entries:
-                if e.get("path") == path:
+                if _norm(e.get("path")) == target_norm:
                     e["favorite"] = bool(value)
                     _write_to_disk_locked()
                     return
         except Exception as exc:
             _log(f"set_favorite failed for {path!r}: {exc}")
+
+
+_MEDIA_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".wav", ".mp3", ".flac", ".ogg", ".m4a"}
+
+
+def disk_inventory_report() -> str:
+    """Build a human-readable report of the persistence state for the
+    Refresh-button debug log. Compares JSON entries to media files actually
+    sitting in ``save_dir``.
+    """
+    lines: list[str] = []
+    lines.append("=== history_persistence inventory ===")
+    lines.append(f"history JSON: {_history_path!r}")
+    lines.append(f"save_dir:     {_save_dir!r}")
+    try:
+        json_size = os.path.getsize(_history_path) if _history_path and os.path.isfile(_history_path) else -1
+    except Exception:
+        json_size = -1
+    lines.append(f"JSON size:    {json_size} bytes")
+    with _lock:
+        v_count = len(_video_entries)
+        a_count = len(_audio_entries)
+        v_paths_norm = {_norm(e.get("path")): e.get("path") for e in _video_entries}
+        a_paths_norm = {_norm(e.get("path")): e.get("path") for e in _audio_entries}
+        v_fav = sum(1 for e in _video_entries if e.get("favorite"))
+        a_fav = sum(1 for e in _audio_entries if e.get("favorite"))
+    lines.append(f"in-memory:    {v_count} video, {a_count} audio  (favorites: {v_fav} video, {a_fav} audio)")
+
+    missing: list[str] = []
+    for orig in list(v_paths_norm.values()) + list(a_paths_norm.values()):
+        if isinstance(orig, str):
+            try:
+                if not os.path.isfile(orig):
+                    missing.append(orig)
+            except Exception:
+                missing.append(orig)
+    lines.append(f"JSON entries with file missing on disk: {len(missing)}")
+    for p in missing[:10]:
+        lines.append(f"  · missing: {p}")
+    if len(missing) > 10:
+        lines.append(f"  · …and {len(missing) - 10} more")
+
+    if _save_dir and os.path.isdir(_save_dir):
+        try:
+            on_disk: list[str] = []
+            for name in os.listdir(_save_dir):
+                full = os.path.join(_save_dir, name)
+                if not os.path.isfile(full):
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                if ext in _MEDIA_EXTS:
+                    on_disk.append(full)
+            lines.append(f"media files in save_dir: {len(on_disk)}")
+            untracked = [p for p in on_disk if _norm(p) not in v_paths_norm and _norm(p) not in a_paths_norm]
+            lines.append(f"on-disk files NOT in history: {len(untracked)}")
+            for p in untracked[:10]:
+                lines.append(f"  · untracked: {os.path.basename(p)}")
+            if len(untracked) > 10:
+                lines.append(f"  · …and {len(untracked) - 10} more")
+        except Exception as exc:
+            lines.append(f"save_dir scan failed: {exc}")
+    else:
+        lines.append("save_dir is not a directory; skipping disk scan.")
+
+    lines.append("=== end inventory ===")
+    return "\n".join(lines)
 
 
 def sync_from_lists(file_list: list[str] | None, file_settings_list: list[Any] | None, *, audio: bool = False) -> None:
@@ -322,7 +436,11 @@ def sync_from_lists(file_list: list[str] | None, file_settings_list: list[Any] |
     with _lock:
         try:
             target = _entries_for(audio)
-            prev_fav = {e.get("path"): bool(e.get("favorite", False)) for e in target if isinstance(e.get("path"), str)}
+            prev_fav: dict[str, bool] = {}
+            for e in target:
+                key = _norm(e.get("path"))
+                if key:
+                    prev_fav[key] = bool(e.get("favorite", False))
             new_entries: list[dict[str, Any]] = []
             paths = file_list or []
             settings = file_settings_list or []
@@ -333,7 +451,7 @@ def sync_from_lists(file_list: list[str] | None, file_settings_list: list[Any] |
                 new_entries.append({
                     "path": path,
                     "settings": cfg if isinstance(cfg, dict) else None,
-                    "favorite": prev_fav.get(path, False),
+                    "favorite": prev_fav.get(_norm(path), False),
                 })
             target[:] = new_entries
             _write_to_disk_locked()

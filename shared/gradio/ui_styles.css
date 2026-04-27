@@ -397,3 +397,54 @@ user-select: text;
     margin-top: 0 !important;
     margin-bottom: 0 !important;
 }
+
+/* ==========================================================================
+   Full History browser
+   ========================================================================== */
+
+/* Favorite (star) button — bigger glyph, yellow when active */
+.wgp-history-fav button,
+button.wgp-history-fav {
+    font-size: 22px !important;
+    line-height: 1 !important;
+    padding: 4px 8px !important;
+    min-width: 44px !important;
+    color: #888 !important;
+}
+.wgp-history-fav-on button,
+button.wgp-history-fav-on {
+    font-size: 22px !important;
+    line-height: 1 !important;
+    padding: 4px 8px !important;
+    min-width: 44px !important;
+    color: #f5c518 !important;          /* IMDb-yellow */
+    text-shadow: 0 0 2px rgba(245, 197, 24, 0.55);
+}
+
+/* Delete confirm button: high-contrast red so it's hard to miss */
+.wgp-history-delete-armed button,
+button.wgp-history-delete-armed {
+    background: #d32f2f !important;
+    border-color: #b71c1c !important;
+    color: #ffffff !important;
+    font-weight: 700 !important;
+    box-shadow: 0 0 0 2px rgba(211, 47, 47, 0.35) !important;
+}
+.wgp-history-delete-armed button:hover,
+button.wgp-history-delete-armed:hover {
+    background: #b71c1c !important;
+}
+
+/* "Latest" badge in the meta line */
+.wgp-history-latest-badge {
+    display: inline-block;
+    background: #2e7d32;
+    color: #fff;
+    font-size: 0.78em;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-right: 6px;
+    vertical-align: middle;
+    letter-spacing: 0.4px;
+}

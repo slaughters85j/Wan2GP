@@ -32,8 +32,15 @@ PROMPT_PREVIEW_CHARS = 260
 STAR_ON = "★"
 STAR_OFF = "☆"
 DELETE_LABEL = "Delete"
-DELETE_CONFIRM_LABEL = "Confirm?"
+DELETE_CONFIRM_LABEL = "⚠ Confirm Delete"
 DELETE_CONFIRM_WINDOW_S = 3.0
+LATEST_BADGE_HTML = "<span class='wgp-history-latest-badge'>LATEST</span>"
+
+# Element-class names — kept in sync with shared/gradio/ui_styles.css
+_FAV_OFF_CLASS = "wgp-history-fav"
+_FAV_ON_CLASS = "wgp-history-fav-on"
+_DELETE_BASE_CLASS = "wgp-history-delete"
+_DELETE_ARMED_CLASS = "wgp-history-delete-armed"
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi"}
@@ -71,6 +78,7 @@ class _RowRefs:
     to_source_btn: gr.Button
     to_control_btn: gr.Button
     delete_btn: gr.Button
+    cancel_btn: gr.Button          # only visible when delete is armed
     path_state: gr.State          # str
     exists_state: gr.State         # bool
     delete_armed_state: gr.State   # float: armed timestamp (0.0 means not armed)
@@ -120,8 +128,10 @@ def _fmt_prompt(settings: Optional[dict]) -> str:
     return p
 
 
-def _fmt_meta(settings: Optional[dict], path: str, exists: bool) -> str:
+def _fmt_meta(settings: Optional[dict], path: str, exists: bool, *, is_latest: bool = False) -> str:
     parts: list[str] = []
+    if is_latest:
+        parts.append(LATEST_BADGE_HTML)
     if not exists:
         parts.append("<span style='color:#d06060'>**file missing**</span>")
     mt = settings.get("model_type") if isinstance(settings, dict) else None
@@ -183,14 +193,15 @@ def build_ui(
                     prompt_md = gr.Markdown("", elem_classes="wgp-history-prompt")
                     meta_md = gr.Markdown("", elem_classes="wgp-history-meta")
                 with gr.Column(scale=0, min_width=60):
-                    fav_btn = gr.Button(STAR_OFF, size="sm", min_width=40)
-                with gr.Column(scale=0, min_width=520):
+                    fav_btn = gr.Button(STAR_OFF, size="sm", min_width=44, elem_classes=[_FAV_OFF_CLASS])
+                with gr.Column(scale=0, min_width=580):
                     with gr.Row():
                         play_btn = gr.Button("Play", size="sm", min_width=70)
                         extract_btn = gr.Button("Extract Settings", size="sm", min_width=130)
                         to_source_btn = gr.Button("To Video Source", size="sm", min_width=120)
                         to_control_btn = gr.Button("To Control Video", size="sm", min_width=130)
-                        delete_btn = gr.Button(DELETE_LABEL, size="sm", min_width=70, variant="secondary")
+                        delete_btn = gr.Button(DELETE_LABEL, size="sm", min_width=70, variant="secondary", elem_classes=[_DELETE_BASE_CLASS])
+                        cancel_btn = gr.Button("Cancel", size="sm", min_width=70, variant="secondary", visible=False)
                 path_state = gr.State("")
                 exists_state = gr.State(False)
                 delete_armed_state = gr.State(0.0)
@@ -205,6 +216,7 @@ def build_ui(
                 to_source_btn=to_source_btn,
                 to_control_btn=to_control_btn,
                 delete_btn=delete_btn,
+                cancel_btn=cancel_btn,
                 path_state=path_state,
                 exists_state=exists_state,
                 delete_armed_state=delete_armed_state,
@@ -323,6 +335,10 @@ def _render_page(
     """Compute every component update for a given page + filter combo."""
     entries_all = history_persistence.snapshot_entries(audio=False)
     filtered = _apply_filters(entries_all, favorites_only, model_filter, lora_filter, search)
+    # The most-recent entry is the LAST one ever appended (regardless of
+    # filters). Tagging by path so the badge follows the same item even when
+    # the user is filtering or paginating.
+    latest_path = entries_all[-1]["path"] if entries_all else None
     total = len(filtered)
     pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     page = max(0, min(page, pages - 1))
@@ -350,9 +366,11 @@ def _render_page(
                 thumb_val = ui.missing_placeholder
 
             row_visible = True
+            is_latest = latest_path is not None and path == latest_path
             prompt_md = _fmt_prompt(settings)
-            meta_md = _fmt_meta(settings, path, exists)
+            meta_md = _fmt_meta(settings, path, exists, is_latest=is_latest)
             fav_label = STAR_ON if fav else STAR_OFF
+            fav_classes = [_FAV_ON_CLASS] if fav else [_FAV_OFF_CLASS]
             # Buttons: disable ops that require a live file / make sense per type
             can_play = exists
             can_extract = True  # settings can be extracted even if file missing
@@ -364,12 +382,13 @@ def _render_page(
                 gr.update(value=thumb_val),        # thumb
                 gr.update(value=prompt_md),        # prompt
                 gr.update(value=meta_md),          # meta
-                gr.update(value=fav_label),        # fav_btn
+                gr.update(value=fav_label, elem_classes=fav_classes),  # fav_btn
                 gr.update(interactive=can_play),   # play_btn
                 gr.update(interactive=can_extract),# extract_btn
                 gr.update(interactive=can_to_video),  # to_source_btn
                 gr.update(interactive=can_to_control), # to_control_btn
-                gr.update(value=DELETE_LABEL, variant="secondary"),  # delete_btn (reset label)
+                gr.update(value=DELETE_LABEL, variant="secondary", elem_classes=[_DELETE_BASE_CLASS]),  # delete_btn (reset)
+                gr.update(visible=False),          # cancel_btn (hidden unless armed)
                 path,                              # path_state
                 exists,                            # exists_state
                 0.0,                               # delete_armed_state reset
@@ -380,12 +399,13 @@ def _render_page(
                 gr.update(value=None),
                 gr.update(value=""),
                 gr.update(value=""),
-                gr.update(value=STAR_OFF),
+                gr.update(value=STAR_OFF, elem_classes=[_FAV_OFF_CLASS]),
                 gr.update(interactive=False),
                 gr.update(interactive=False),
                 gr.update(interactive=False),
                 gr.update(interactive=False),
-                gr.update(value=DELETE_LABEL, variant="secondary"),
+                gr.update(value=DELETE_LABEL, variant="secondary", elem_classes=[_DELETE_BASE_CLASS]),
+                gr.update(visible=False),
                 "",
                 False,
                 0.0,
@@ -419,7 +439,7 @@ def _render_outputs(ui: HistoryBrowserUI) -> list[Any]:
     for r in ui.rows:
         outs.extend([
             r.row, r.thumb, r.prompt_md, r.meta_md,
-            r.fav_btn, r.play_btn, r.extract_btn, r.to_source_btn, r.to_control_btn, r.delete_btn,
+            r.fav_btn, r.play_btn, r.extract_btn, r.to_source_btn, r.to_control_btn, r.delete_btn, r.cancel_btn,
             r.path_state, r.exists_state, r.delete_armed_state,
         ])
     outs.extend([ui.model_filter, ui.lora_filter, ui.page_info_md, ui.prev_btn, ui.next_btn, ui.empty_md, ui.current_page])
@@ -459,6 +479,24 @@ def wire_events(
             # Best-effort: hide everything rather than raising into the UI.
             return _render_page(ui, 0, False, [], [], "")
 
+    def _refresh_with_debug(page, fav_only, m_filter, l_filter, search):
+        """Refresh-button handler. Reloads the JSON from disk so the user sees
+        the freshest state, dumps an inventory report (in-memory vs disk) to
+        the console, then renders the page normally."""
+        try:
+            mem_before_v, mem_before_a = len(history_persistence.snapshot_entries(False)), len(history_persistence.snapshot_entries(True))
+            disk_v, disk_a = history_persistence.reload_from_disk()
+            delta_v = disk_v - mem_before_v
+            delta_a = disk_a - mem_before_a
+            _log(f"refresh: reloaded JSON. video {mem_before_v}→{disk_v} (Δ{delta_v:+d}), audio {mem_before_a}→{disk_a} (Δ{delta_a:+d})")
+            try:
+                print(history_persistence.disk_inventory_report())
+            except Exception as exc:
+                _log(f"refresh: inventory report failed: {exc}")
+        except Exception as exc:
+            _log(f"refresh debug step failed: {exc}")
+        return _refresh_fn(page, fav_only, m_filter, l_filter, search)
+
     def _goto_page(delta: int):
         def _fn(page, fav_only, m_filter, l_filter, search):
             return _refresh_fn((int(page or 0)) + delta, fav_only, m_filter, l_filter, search)
@@ -471,9 +509,9 @@ def wire_events(
     filter_inputs = [ui.current_page, ui.favorites_only, ui.model_filter, ui.lora_filter, ui.search_box]
     all_outputs = _render_outputs(ui)
 
-    # Manual refresh
+    # Manual refresh — reloads JSON from disk and prints an inventory delta.
     ui.refresh_btn.click(
-        fn=_refresh_fn, inputs=filter_inputs, outputs=all_outputs, show_progress="hidden",
+        fn=_refresh_with_debug, inputs=filter_inputs, outputs=all_outputs, show_progress="hidden",
     )
 
     # Filter changes reset to page 0
@@ -561,14 +599,31 @@ def wire_events(
                 return (gallery_update, *refresh_updates)
             # Arm: small partial update to this row only.
             n_cols = len(_render_outputs(ui))
-            per_row = 13
+            per_row = 14
             targets_per_row = list(range(row_idx * per_row, row_idx * per_row + per_row))
             # Build a tuple of gr.update() for all outputs, then override this row's
-            # delete button + armed state.
+            # delete button + cancel button + armed state.
             base = [gr.update()] * n_cols
-            base[targets_per_row[9]] = gr.update(value=DELETE_CONFIRM_LABEL, variant="stop")  # delete_btn
-            base[targets_per_row[12]] = now  # delete_armed_state
+            base[targets_per_row[9]] = gr.update(  # delete_btn → red Confirm
+                value=DELETE_CONFIRM_LABEL,
+                variant="stop",
+                elem_classes=[_DELETE_BASE_CLASS, _DELETE_ARMED_CLASS],
+            )
+            base[targets_per_row[10]] = gr.update(visible=True)  # cancel_btn appears
+            base[targets_per_row[13]] = now                       # delete_armed_state
             return (gr.update(), *base)
+        return _fn
+
+    def _cancel_delete_action(row_idx: int):
+        """Return a click handler that disarms a single row without firing a
+        full page render. Returns updates only for this row's delete + cancel
+        + armed_state."""
+        def _fn():
+            return [
+                gr.update(value=DELETE_LABEL, variant="secondary", elem_classes=[_DELETE_BASE_CLASS]),  # delete_btn
+                gr.update(visible=False),  # cancel_btn
+                0.0,                       # delete_armed_state
+            ]
         return _fn
 
     def _current_top_gallery_update(state_obj):
@@ -622,6 +677,13 @@ def wire_events(
             fn=_delete_row_action(row_idx),
             inputs=[state, r.path_state, r.delete_armed_state, *filter_inputs],
             outputs=[top_gallery, *all_outputs],
+            show_progress="hidden",
+        )
+        # Cancel: dismiss the armed state for this row only.
+        r.cancel_btn.click(
+            fn=_cancel_delete_action(row_idx),
+            inputs=[],
+            outputs=[r.delete_btn, r.cancel_btn, r.delete_armed_state],
             show_progress="hidden",
         )
 

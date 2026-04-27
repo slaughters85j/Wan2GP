@@ -1,0 +1,1520 @@
+From b25d2ea70c51cc30fc669fcb7c210b189b9b10a3 Mon Sep 17 00:00:00 2001
+From: "John S." <john.es.saunders@gmail.com>
+Date: Thu, 23 Apr 2026 19:31:33 -0400
+Subject: [PATCH] Add persistent history + Full History browser component
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Persists the top Gallery across restarts and adds a paginated history
+browser below Queue Management for browsing deep history without loading
+every video as a heavyweight player.
+
+New files (self-contained, survive upstream pulls untouched):
+- shared/utils/history_persistence.py — thread-safe JSON store at
+  outputs/_wangp_history.json (schema v2 with favorites). Atomic writes;
+  silent failure handling; filters missing files on load.
+- shared/utils/video_thumbs.py — ffmpeg first-frame extraction cached to
+  outputs/_thumbs/.
+- shared/utils/gallery_push.py — helper that promotes a historical entry
+  into the live top Gallery's in-memory lists (dedupes + selects).
+- shared/components/history_browser.py — paginated UI component (10
+  rows/page). Filters: favorites-only, model, LoRAs, prompt search. Per
+  row: thumbnail, prompt, meta, favorite toggle, Play, Extract Settings,
+  To Video Source, To Control Video, two-click Delete (file + JSON
+  entry + thumbnail).
+- icons/missing_video.{png,svg} — placeholder for rows whose file has
+  been deleted but whose metadata is still persisted.
+
+Surgical wgp.py edits (~50 lines across 15 touch points):
+- Import the two new modules.
+- init_history_store(save_path) at module load.
+- Hooks in record_file_metadata / post-processing append / eject_video /
+  eject_audio / clear_deleted_files / add_videos_to_gallery.
+- Seed gen["file_list"] / gen["audio_file_list"] from persistence in
+  generate_video_tab; seed the top Gallery's value= with those files.
+- Fold history_browser's hidden extract/to-source/to-control triggers
+  into the existing button chains via gr.on so existing handlers run
+  unchanged.
+- build_ui + wire_events + main.load initial render.
+
+Bundled upstream bug fix:
+- finalize_generation returned gr.Gallery(selected_index=choice) with no
+  value=, which Gradio 4 treats as a full replacement, wiping the
+  gallery to empty on main.load. Previously harmless because file_list
+  was always empty on launch; persistence exposes it. Fixed by passing
+  value=gen.get("file_list", []).
+
+Guardrails:
+- Every hook is wrapped in try/except with a [history_persistence] log;
+  the app never aborts on persistence failure.
+- Missing files are silently filtered from the top-Gallery seed; the
+  history browser keeps them visible with a placeholder so metadata
+  remains reachable.
+- Malformed JSON starts empty with an error log, does not crash.
+- truncate_list is intentionally not hooked: it wipes in-memory
+  file_list per queued generation (when clear_file_list=0) but on-disk
+  history survives because appends merge via path dedupe.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ icons/missing_video.png              | Bin 0 -> 1343 bytes
+ icons/missing_video.svg              |  16 +
+ shared/components/__init__.py        |   0
+ shared/components/history_browser.py | 635 +++++++++++++++++++++++++++
+ shared/utils/gallery_push.py         |  53 +++
+ shared/utils/history_persistence.py  | 341 ++++++++++++++
+ shared/utils/video_thumbs.py         |  97 ++++
+ wgp.py                               | 118 ++++-
+ 8 files changed, 1250 insertions(+), 10 deletions(-)
+ create mode 100644 icons/missing_video.png
+ create mode 100644 icons/missing_video.svg
+ create mode 100644 shared/components/__init__.py
+ create mode 100644 shared/components/history_browser.py
+ create mode 100644 shared/utils/gallery_push.py
+ create mode 100644 shared/utils/history_persistence.py
+ create mode 100644 shared/utils/video_thumbs.py
+
+diff --git a/icons/missing_video.png b/icons/missing_video.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..a0bd683374233e7aa5b93fdd962c7d41391fcf65
+GIT binary patch
+literal 1343
+zcmeAS@N?(olHy`uVBq!ia0vp^TYxx^g9%77a;?*0U|?nQba4!+nDh4TUH|A(nd2Yt
+zzf^8M61Y6kp^>X+XJ|qM=Z2FG0#h0c4UN@|3&rp0e9Wpp`RMMRm?@btb1#-DFKE8F
+zp~qHcp4AKkj;RI<52dWQc#*xYad9l`zSzwhi|Y1&u8f`g&1Q=8y`P0ub(&L)xcLnm
+z)=F%v5o0KHQ0idzpe|B7Hg(su?~>1}tj`(ydF=Va&BnOtfu5jlpA4(3e(>ri*>=Y)
+z!_Nl3lBu8ft22|+|GEs*l!H60xaU1;5OJ1qaDt)(SEFy9egA@G_sN42#Z#ta{SRYz
+z<5N&XLNE3BO7C$`TDaTdiroZ`_1`Vc{L|Uh{`5_{^tM)XYyaF?%Dg^5%;&2ud$W~w
+zu?JICzjLe0wiXLHM<r>6zTOEQJdbY7;_g)FI}-ED&!sy*b*owG`zp5lD#KKLk?H^3
+zKrX(e^7-?`rngNNa{kxi#k7u0>{xSMC!`}ed(*zn0g6CFTzMW<utXLJxMwYUQ*PGH
+zz#sfAsz-UML6pjZ`xX<9CciY~OPQ#0_pY70<jKpiG81f$Fvi3dXXKvx7kOZc?FZgM
+z22NBI{@pUjK6QQ-qujDLl~R^Rexx*X&)<CE(Fw(4`C$xqjx4;FBlf_q>iw@yl^=eR
+zZy%`fP5t&<+2zn>Q}!hij~M>#XAlVDS7x6e07V>9?#puhe`a45TV1-mUcm69tovo_
+z_pZtl@6O!ToGSXtSlw@4)h6eg-}VStpO~DhAb0NFguDs!<`q`I5KGQcwD>=zJ!;qf
+z9VPW2GtC6}j~B}5tTu>VlY6|cyzaT(zmMwa=jZgT-4u11@4EThQzs0hdj8hl<^Ei}
+zF%)Pnmrrl{^Jo00uYZ4bV{=iFdwa_N2fn3OZyGP3`*hvkb4JH*^zPH%oqPWHwDk04
+zS9!1K9(QBgRP-inb?CeI+&;c<yv|$Px{>7R{rmIx)ZL3ed_HfN`seYF^QUf{NU#w3
+zwCjB9;f1`bS7qIoke#L<`(xGe%fYvA2<<<WVRZK+f8~D5?^TDRx3}k4-i@EObJZjB
+zimk6Yj^Dj^_haox#`Hf$f6Ukxe|&hqzVhzd*n8aVukWSwgkCrExx4qV<^Q8!p6s}p
+zlj!uI;)%zBxPTuq%Y0+aW}lg)qS>{`E<_|%(PFuVmx)v?&pGX`B%_&+zt83LxoW<>
+zx0fg8<(F%w+mB6qynUidX3d%N62FswHdg*Evba6({qK*LZoRuaxogv@7KJpKNe3@{
+ze0%+3hRdWSdo903NcL>Jnh{bf(d+VPe*eq2yJpOt{oTto^<&-h|I_MsNYqcbaO!Zq
+z{2KYg2?qbZ-x5j|5@tGHA11`{&*-&=USiKvORm$}*^};HOxn6l_P2pW`TFITC;tx$
+z%&|NlD6;?NvsF#Sn^{|bU$c825wdAoyMT+d<urL6*;Q+HKHD90`^UG&OI)d?SIc)Q
+z|Gew0t!;dH^830E6IDE!udkQ#RV%IhaO~<4>u<kzy`CKnjJgMZ_7+&2X=#YO`8M$S
+zomcWZe%^kxUOz20{JL4iowq&pi+W|OQ%gMTg6@lSy7jOn$NP&5Gr93yxXG%S!+nHN
+e1sm%5#4i*wN9UUfM-8xGWbkzLb6Mw<&;$VQwsW8W
+
+literal 0
+HcmV?d00001
+
+diff --git a/icons/missing_video.svg b/icons/missing_video.svg
+new file mode 100644
+index 0000000..cf3ad3b
+--- /dev/null
++++ b/icons/missing_video.svg
+@@ -0,0 +1,16 @@
++<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 110" width="180" height="110">
++  <rect width="180" height="110" fill="#1b2230"/>
++  <g transform="translate(55 25)" fill="none" stroke="#5a6b85" stroke-width="2.5" stroke-linejoin="round">
++    <rect x="0" y="5" width="70" height="50" rx="4" fill="#273247"/>
++    <path d="M 25 20 L 25 40 L 50 30 Z" fill="#5a6b85" stroke="none"/>
++    <rect x="-6" y="0" width="8" height="8" fill="#3a4558"/>
++    <rect x="-6" y="15" width="8" height="8" fill="#3a4558"/>
++    <rect x="-6" y="30" width="8" height="8" fill="#3a4558"/>
++    <rect x="-6" y="45" width="8" height="8" fill="#3a4558"/>
++    <rect x="68" y="0" width="8" height="8" fill="#3a4558"/>
++    <rect x="68" y="15" width="8" height="8" fill="#3a4558"/>
++    <rect x="68" y="30" width="8" height="8" fill="#3a4558"/>
++    <rect x="68" y="45" width="8" height="8" fill="#3a4558"/>
++  </g>
++  <text x="90" y="90" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#8091a8">file missing</text>
++</svg>
+diff --git a/shared/components/__init__.py b/shared/components/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/shared/components/history_browser.py b/shared/components/history_browser.py
+new file mode 100644
+index 0000000..653fcd6
+--- /dev/null
++++ b/shared/components/history_browser.py
+@@ -0,0 +1,635 @@
++"""Paginated history browser for WanGP.
++
++Sits below the Queue Management accordion. Lets the user browse the full
++persisted history (well past the ``clear_file_list`` cap of the top Gallery)
++without loading every video as a heavyweight ``gr.Video`` player. Each row
++shows a cached first-frame thumbnail plus the prompt and a small metadata
++line, with action buttons that reuse wgp.py's existing handlers by routing
++through ``push_to_top_gallery``.
++
++The component is self-contained: ``build_ui`` constructs the Gradio widgets,
++``wire_events`` binds them. wgp.py only needs to plumb references to the top
++Gallery, its ``last_choice`` tracker, and three hidden "trigger" textboxes
++that fold the row actions into the existing Extract Settings / To Video
++Source / To Control Video chains.
++"""
++
++from __future__ import annotations
++
++import os
++import time
++from dataclasses import dataclass
++from typing import Any, Callable, Optional
++
++import gradio as gr
++
++from shared.utils import history_persistence, video_thumbs
++from shared.utils.gallery_push import push_to_top_gallery
++
++
++PAGE_SIZE = 10
++PROMPT_PREVIEW_CHARS = 260
++STAR_ON = "★"
++STAR_OFF = "☆"
++DELETE_LABEL = "Delete"
++DELETE_CONFIRM_LABEL = "Confirm?"
++DELETE_CONFIRM_WINDOW_S = 3.0
++
++IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
++VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi"}
++
++
++def _is_image(path: str) -> bool:
++    return os.path.splitext(path)[1].lower() in IMAGE_EXTS
++
++
++def _is_video(path: str) -> bool:
++    return os.path.splitext(path)[1].lower() in VIDEO_EXTS
++
++
++def _log(msg: str) -> None:
++    try:
++        print(f"[history_browser] {msg}")
++    except Exception:
++        pass
++
++
++# ---------------------------------------------------------------------------
++# Component bundles
++# ---------------------------------------------------------------------------
++
++
++@dataclass
++class _RowRefs:
++    row: gr.Row
++    thumb: gr.Image
++    prompt_md: gr.Markdown
++    meta_md: gr.Markdown
++    fav_btn: gr.Button
++    play_btn: gr.Button
++    extract_btn: gr.Button
++    to_source_btn: gr.Button
++    to_control_btn: gr.Button
++    delete_btn: gr.Button
++    path_state: gr.State          # str
++    exists_state: gr.State         # bool
++    delete_armed_state: gr.State   # float: armed timestamp (0.0 means not armed)
++
++
++@dataclass
++class HistoryBrowserUI:
++    accordion: gr.Accordion
++    # Filter controls
++    favorites_only: gr.Checkbox
++    model_filter: gr.Dropdown
++    lora_filter: gr.Dropdown
++    search_box: gr.Textbox
++    refresh_btn: gr.Button
++    # Nav
++    prev_btn: gr.Button
++    next_btn: gr.Button
++    page_info_md: gr.Markdown
++    empty_md: gr.Markdown
++    # Rows
++    rows: list[_RowRefs]
++    # Paging state
++    current_page: gr.State
++    # Hidden external triggers (wgp.py wires these into existing chains)
++    extract_trigger: gr.Text
++    to_source_trigger: gr.Text
++    to_control_trigger: gr.Text
++    # Shared config
++    save_dir: str
++    missing_placeholder: Optional[str]
++
++
++# ---------------------------------------------------------------------------
++# UI construction
++# ---------------------------------------------------------------------------
++
++
++def _fmt_prompt(settings: Optional[dict]) -> str:
++    if not isinstance(settings, dict):
++        return "_(no settings)_"
++    p = settings.get("prompt")
++    if not isinstance(p, str) or not p.strip():
++        return "_(no prompt)_"
++    p = p.strip()
++    if len(p) > PROMPT_PREVIEW_CHARS:
++        p = p[:PROMPT_PREVIEW_CHARS].rstrip() + "…"
++    return p
++
++
++def _fmt_meta(settings: Optional[dict], path: str, exists: bool) -> str:
++    parts: list[str] = []
++    if not exists:
++        parts.append("<span style='color:#d06060'>**file missing**</span>")
++    mt = settings.get("model_type") if isinstance(settings, dict) else None
++    if isinstance(mt, str) and mt:
++        parts.append(f"`{mt}`")
++    if isinstance(settings, dict):
++        loras = settings.get("activated_loras")
++        if isinstance(loras, list) and loras:
++            names = []
++            for l in loras:
++                if isinstance(l, str):
++                    b, _ = os.path.splitext(os.path.basename(l))
++                    names.append(b)
++            if names:
++                shown = ", ".join(names[:3])
++                extra = f" +{len(names)-3}" if len(names) > 3 else ""
++                parts.append(f"LoRAs: {shown}{extra}")
++        seed = settings.get("seed")
++        if isinstance(seed, int):
++            parts.append(f"seed {seed}")
++        res = settings.get("resolution")
++        if isinstance(res, str) and res:
++            parts.append(res)
++    parts.append(f"<span style='opacity:0.55;font-family:monospace;font-size:0.85em'>{os.path.basename(path)}</span>")
++    return " · ".join(parts)
++
++
++def build_ui(
++    save_dir: str,
++    missing_placeholder: Optional[str] = None,
++    accordion_label: str = "Full History",
++) -> HistoryBrowserUI:
++    """Construct the Gradio component tree. Must be called inside a Blocks."""
++    rows: list[_RowRefs] = []
++    with gr.Accordion(accordion_label, open=False) as accordion:
++        with gr.Row():
++            favorites_only = gr.Checkbox(label="Favorites only", value=False, scale=0, min_width=140)
++            model_filter = gr.Dropdown(label="Model", choices=[], value=[], multiselect=True, scale=1, interactive=True)
++            lora_filter = gr.Dropdown(label="LoRAs", choices=[], value=[], multiselect=True, scale=2, interactive=True)
++            search_box = gr.Textbox(label="Search prompt", value="", scale=2, placeholder="substring match…")
++            refresh_btn = gr.Button("⟳ Refresh", size="sm", scale=0, min_width=100)
++
++        empty_md = gr.Markdown("_No history entries match the current filters._", visible=False)
++
++        for i in range(PAGE_SIZE):
++            with gr.Row(visible=False, equal_height=True) as row:
++                with gr.Column(scale=0, min_width=180):
++                    thumb = gr.Image(
++                        value=None,
++                        show_label=False,
++                        interactive=False,
++                        height=110,
++                        width=180,
++                        show_download_button=False,
++                        show_fullscreen_button=False,
++                        container=False,
++                    )
++                with gr.Column(scale=4):
++                    prompt_md = gr.Markdown("", elem_classes="wgp-history-prompt")
++                    meta_md = gr.Markdown("", elem_classes="wgp-history-meta")
++                with gr.Column(scale=0, min_width=60):
++                    fav_btn = gr.Button(STAR_OFF, size="sm", min_width=40)
++                with gr.Column(scale=0, min_width=520):
++                    with gr.Row():
++                        play_btn = gr.Button("Play", size="sm", min_width=70)
++                        extract_btn = gr.Button("Extract Settings", size="sm", min_width=130)
++                        to_source_btn = gr.Button("To Video Source", size="sm", min_width=120)
++                        to_control_btn = gr.Button("To Control Video", size="sm", min_width=130)
++                        delete_btn = gr.Button(DELETE_LABEL, size="sm", min_width=70, variant="secondary")
++                path_state = gr.State("")
++                exists_state = gr.State(False)
++                delete_armed_state = gr.State(0.0)
++            rows.append(_RowRefs(
++                row=row,
++                thumb=thumb,
++                prompt_md=prompt_md,
++                meta_md=meta_md,
++                fav_btn=fav_btn,
++                play_btn=play_btn,
++                extract_btn=extract_btn,
++                to_source_btn=to_source_btn,
++                to_control_btn=to_control_btn,
++                delete_btn=delete_btn,
++                path_state=path_state,
++                exists_state=exists_state,
++                delete_armed_state=delete_armed_state,
++            ))
++
++        with gr.Row():
++            prev_btn = gr.Button("← Prev", size="sm", scale=0, min_width=90)
++            page_info_md = gr.Markdown("Page 1 / 1", elem_classes="wgp-history-page")
++            next_btn = gr.Button("Next →", size="sm", scale=0, min_width=90)
++
++        current_page = gr.State(0)
++        extract_trigger = gr.Text(visible=False, value="")
++        to_source_trigger = gr.Text(visible=False, value="")
++        to_control_trigger = gr.Text(visible=False, value="")
++
++    return HistoryBrowserUI(
++        accordion=accordion,
++        favorites_only=favorites_only,
++        model_filter=model_filter,
++        lora_filter=lora_filter,
++        search_box=search_box,
++        refresh_btn=refresh_btn,
++        prev_btn=prev_btn,
++        next_btn=next_btn,
++        page_info_md=page_info_md,
++        empty_md=empty_md,
++        rows=rows,
++        current_page=current_page,
++        extract_trigger=extract_trigger,
++        to_source_trigger=to_source_trigger,
++        to_control_trigger=to_control_trigger,
++        save_dir=save_dir,
++        missing_placeholder=missing_placeholder,
++    )
++
++
++# ---------------------------------------------------------------------------
++# Filtering / pagination
++# ---------------------------------------------------------------------------
++
++
++def _apply_filters(
++    entries: list[dict],
++    favorites_only: bool,
++    model_filter: list[str] | None,
++    lora_filter: list[str] | None,
++    search: str | None,
++) -> list[dict]:
++    out = entries
++    if favorites_only:
++        out = [e for e in out if e.get("favorite")]
++    if model_filter:
++        mset = set(model_filter)
++        out = [e for e in out if (e.get("settings") or {}).get("model_type") in mset]
++    if lora_filter:
++        lset = set(lora_filter)
++        def _row_loras(e: dict) -> set[str]:
++            loras = (e.get("settings") or {}).get("activated_loras") or []
++            names = set()
++            for l in loras:
++                if isinstance(l, str):
++                    names.add(l)
++                    b = os.path.basename(l)
++                    names.add(b)
++                    names.add(os.path.splitext(b)[0])
++            return names
++        out = [e for e in out if _row_loras(e) & lset]
++    if search:
++        s = search.strip().lower()
++        if s:
++            def _match(e: dict) -> bool:
++                p = (e.get("settings") or {}).get("prompt") or ""
++                return isinstance(p, str) and s in p.lower()
++            out = [e for e in out if _match(e)]
++    return out
++
++
++def _distinct_models(entries: list[dict]) -> list[str]:
++    seen: list[str] = []
++    seen_set: set[str] = set()
++    for e in entries:
++        mt = (e.get("settings") or {}).get("model_type")
++        if isinstance(mt, str) and mt and mt not in seen_set:
++            seen_set.add(mt)
++            seen.append(mt)
++    return sorted(seen)
++
++
++def _distinct_loras(entries: list[dict]) -> list[str]:
++    seen_set: set[str] = set()
++    for e in entries:
++        loras = (e.get("settings") or {}).get("activated_loras") or []
++        for l in loras:
++            if isinstance(l, str):
++                b, _ = os.path.splitext(os.path.basename(l))
++                if b:
++                    seen_set.add(b)
++    return sorted(seen_set)
++
++
++def _lora_label_to_match_values(labels: list[str]) -> list[str]:
++    """The Dropdown stores human-readable LoRA basenames; expand to all
++    forms that might appear in the stored settings (full path, basename with
++    ext, basename without)."""
++    return list(labels)
++
++
++def _render_page(
++    ui: HistoryBrowserUI,
++    page: int,
++    favorites_only: bool,
++    model_filter: list[str] | None,
++    lora_filter: list[str] | None,
++    search: str | None,
++) -> list[Any]:
++    """Compute every component update for a given page + filter combo."""
++    entries_all = history_persistence.snapshot_entries(audio=False)
++    filtered = _apply_filters(entries_all, favorites_only, model_filter, lora_filter, search)
++    total = len(filtered)
++    pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
++    page = max(0, min(page, pages - 1))
++    start = page * PAGE_SIZE
++    slice_ = filtered[start:start + PAGE_SIZE]
++
++    updates: list[Any] = []
++    for i in range(PAGE_SIZE):
++        if i < len(slice_):
++            e = slice_[i]
++            path = e["path"]
++            exists = bool(e.get("exists"))
++            settings = e.get("settings") or {}
++            fav = bool(e.get("favorite"))
++            is_image = _is_image(path)
++            is_video = _is_video(path)
++
++            # Thumbnail
++            thumb_val: Any
++            if exists and is_image:
++                thumb_val = path
++            elif exists and is_video:
++                thumb_val = video_thumbs.get_or_make_thumbnail(path, ui.save_dir) or ui.missing_placeholder
++            else:
++                thumb_val = ui.missing_placeholder
++
++            row_visible = True
++            prompt_md = _fmt_prompt(settings)
++            meta_md = _fmt_meta(settings, path, exists)
++            fav_label = STAR_ON if fav else STAR_OFF
++            # Buttons: disable ops that require a live file / make sense per type
++            can_play = exists
++            can_extract = True  # settings can be extracted even if file missing
++            can_to_video = exists and is_video
++            # "To Control Video" accepts video inputs only
++            can_to_control = exists and is_video
++            updates.extend([
++                gr.update(visible=row_visible),   # row
++                gr.update(value=thumb_val),        # thumb
++                gr.update(value=prompt_md),        # prompt
++                gr.update(value=meta_md),          # meta
++                gr.update(value=fav_label),        # fav_btn
++                gr.update(interactive=can_play),   # play_btn
++                gr.update(interactive=can_extract),# extract_btn
++                gr.update(interactive=can_to_video),  # to_source_btn
++                gr.update(interactive=can_to_control), # to_control_btn
++                gr.update(value=DELETE_LABEL, variant="secondary"),  # delete_btn (reset label)
++                path,                              # path_state
++                exists,                            # exists_state
++                0.0,                               # delete_armed_state reset
++            ])
++        else:
++            updates.extend([
++                gr.update(visible=False),
++                gr.update(value=None),
++                gr.update(value=""),
++                gr.update(value=""),
++                gr.update(value=STAR_OFF),
++                gr.update(interactive=False),
++                gr.update(interactive=False),
++                gr.update(interactive=False),
++                gr.update(interactive=False),
++                gr.update(value=DELETE_LABEL, variant="secondary"),
++                "",
++                False,
++                0.0,
++            ])
++
++    # Filter choices
++    model_choices = _distinct_models(entries_all)
++    lora_choices = _distinct_loras(entries_all)
++    kept_model = [m for m in (model_filter or []) if m in model_choices]
++    kept_lora = [l for l in (lora_filter or []) if l in lora_choices]
++
++    updates.append(gr.update(choices=model_choices, value=kept_model))
++    updates.append(gr.update(choices=lora_choices, value=kept_lora))
++
++    # Page info and nav
++    updates.append(gr.update(value=f"Page {page + 1} / {pages}  ·  {total} item" + ("" if total == 1 else "s")))
++    updates.append(gr.update(interactive=page > 0))
++    updates.append(gr.update(interactive=page < pages - 1))
++
++    # Empty state
++    updates.append(gr.update(visible=total == 0))
++
++    # Current page state
++    updates.append(page)
++
++    return updates
++
++
++def _render_outputs(ui: HistoryBrowserUI) -> list[Any]:
++    outs: list[Any] = []
++    for r in ui.rows:
++        outs.extend([
++            r.row, r.thumb, r.prompt_md, r.meta_md,
++            r.fav_btn, r.play_btn, r.extract_btn, r.to_source_btn, r.to_control_btn, r.delete_btn,
++            r.path_state, r.exists_state, r.delete_armed_state,
++        ])
++    outs.extend([ui.model_filter, ui.lora_filter, ui.page_info_md, ui.prev_btn, ui.next_btn, ui.empty_md, ui.current_page])
++    return outs
++
++
++# ---------------------------------------------------------------------------
++# Event wiring
++# ---------------------------------------------------------------------------
++
++
++def wire_events(
++    ui: HistoryBrowserUI,
++    *,
++    state: gr.State,
++    top_gallery: gr.Gallery,
++    last_choice: gr.Number,
++    output_trigger: Optional[gr.Text] = None,
++    get_gen_info: Callable[[Any], dict],
++    select_gallery_tab_to_video: Optional[Callable[[], Any]] = None,
++):
++    """Bind all row/nav/filter events.
++
++    Args:
++        state: the wgp session state.
++        top_gallery: the main Gallery component ('output' in wgp.py).
++        last_choice: the hidden gr.Number tracking the top Gallery's selection.
++        output_trigger: if provided, its ``.change`` refreshes the browser.
++        get_gen_info: wgp.py's ``get_gen_info`` function.
++    """
++
++    def _refresh_fn(page, fav_only, m_filter, l_filter, search):
++        try:
++            return _render_page(ui, int(page or 0), bool(fav_only), list(m_filter or []), list(l_filter or []), str(search or ""))
++        except Exception as exc:
++            _log(f"render failed: {exc}")
++            # Best-effort: hide everything rather than raising into the UI.
++            return _render_page(ui, 0, False, [], [], "")
++
++    def _goto_page(delta: int):
++        def _fn(page, fav_only, m_filter, l_filter, search):
++            return _refresh_fn((int(page or 0)) + delta, fav_only, m_filter, l_filter, search)
++        return _fn
++
++    def _reset_to_page_0(page, fav_only, m_filter, l_filter, search):
++        # Called when a filter changes.
++        return _refresh_fn(0, fav_only, m_filter, l_filter, search)
++
++    filter_inputs = [ui.current_page, ui.favorites_only, ui.model_filter, ui.lora_filter, ui.search_box]
++    all_outputs = _render_outputs(ui)
++
++    # Manual refresh
++    ui.refresh_btn.click(
++        fn=_refresh_fn, inputs=filter_inputs, outputs=all_outputs, show_progress="hidden",
++    )
++
++    # Filter changes reset to page 0
++    for comp in (ui.favorites_only, ui.model_filter, ui.lora_filter):
++        comp.change(fn=_reset_to_page_0, inputs=filter_inputs, outputs=all_outputs, show_progress="hidden")
++    ui.search_box.submit(fn=_reset_to_page_0, inputs=filter_inputs, outputs=all_outputs, show_progress="hidden")
++
++    # Pagination
++    ui.prev_btn.click(fn=_goto_page(-1), inputs=filter_inputs, outputs=all_outputs, show_progress="hidden")
++    ui.next_btn.click(fn=_goto_page(+1), inputs=filter_inputs, outputs=all_outputs, show_progress="hidden")
++
++    # Auto-refresh when a new generation completes
++    if output_trigger is not None:
++        output_trigger.change(fn=_refresh_fn, inputs=filter_inputs, outputs=all_outputs, show_progress="hidden")
++
++    # ------------- Per-row events -------------
++
++    def _on_favorite(path, page, fav_only, m_filter, l_filter, search):
++        if isinstance(path, str) and path:
++            history_persistence.toggle_favorite(path, audio=False)
++        return _refresh_fn(page, fav_only, m_filter, l_filter, search)
++
++    def _push_and_select(state_obj, path, exists):
++        """Push the history entry into the live top Gallery and return the
++        Gallery + last_choice updates. ``exists`` lets us no-op cleanly when
++        the underlying file is gone."""
++        if not exists or not isinstance(path, str) or not path:
++            gr.Info("File is missing from disk; cannot load into the player.")
++            return gr.update(), gr.update()
++        try:
++            gen = get_gen_info(state_obj)
++        except Exception as exc:
++            _log(f"get_gen_info failed: {exc}")
++            return gr.update(), gr.update()
++        # Pull the latest persisted settings for this path (authoritative).
++        settings = None
++        for e in history_persistence.snapshot_entries(audio=False):
++            if e.get("path") == path:
++                settings = e.get("settings")
++                break
++        idx = push_to_top_gallery(gen, path, settings)
++        file_list = gen.get("file_list") or []
++        return gr.Gallery(value=file_list, selected_index=idx), idx
++
++    def _on_play(state_obj, path, exists):
++        g, lc = _push_and_select(state_obj, path, exists)
++        return g, lc
++
++    def _on_action_with_trigger(state_obj, path, exists):
++        """Shared implementation for Extract / To Source / To Control: push to
++        top Gallery, update last_choice, and emit a fresh trigger value so
++        wgp.py's existing chain fires."""
++        g, lc = _push_and_select(state_obj, path, exists)
++        trig = str(time.time()) if exists else gr.update()
++        return g, lc, trig
++
++    def _delete_row_action(row_idx: int):
++        """Factory: returns a click handler for the delete button on row
++        ``row_idx``. Keeps the full-render behavior on fire; keeps a targeted
++        update on arm."""
++        def _fn(state_obj, path, armed_ts, page, fav_only, m_filter, l_filter, search):
++            now = time.time()
++            if isinstance(armed_ts, (int, float)) and armed_ts > 0 and (now - armed_ts) < DELETE_CONFIRM_WINDOW_S:
++                # Fire: delete then full refresh.
++                if isinstance(path, str) and path:
++                    def _thumb_cb(p):
++                        video_thumbs.delete_thumbnail_for(p, ui.save_dir)
++                    history_persistence.delete_entry(path, audio=False, delete_file=True, thumb_cb=_thumb_cb)
++                    try:
++                        gen = get_gen_info(state_obj)
++                        fl = gen.get("file_list") or []
++                        fsl = gen.get("file_settings_list") or []
++                        if path in fl:
++                            idx = fl.index(path)
++                            fl.pop(idx)
++                            if idx < len(fsl):
++                                fsl.pop(idx)
++                            sel = gen.get("selected", 0)
++                            if isinstance(sel, int) and sel >= len(fl):
++                                gen["selected"] = max(len(fl) - 1, 0)
++                    except Exception as exc:
++                        _log(f"top-gallery cleanup after delete failed: {exc}")
++                gallery_update = _current_top_gallery_update(state_obj)
++                refresh_updates = _refresh_fn(page, fav_only, m_filter, l_filter, search)
++                return (gallery_update, *refresh_updates)
++            # Arm: small partial update to this row only.
++            n_cols = len(_render_outputs(ui))
++            per_row = 13
++            targets_per_row = list(range(row_idx * per_row, row_idx * per_row + per_row))
++            # Build a tuple of gr.update() for all outputs, then override this row's
++            # delete button + armed state.
++            base = [gr.update()] * n_cols
++            base[targets_per_row[9]] = gr.update(value=DELETE_CONFIRM_LABEL, variant="stop")  # delete_btn
++            base[targets_per_row[12]] = now  # delete_armed_state
++            return (gr.update(), *base)
++        return _fn
++
++    def _current_top_gallery_update(state_obj):
++        try:
++            gen = get_gen_info(state_obj)
++            fl = gen.get("file_list") or []
++            sel = gen.get("selected", 0) if fl else None
++            return gr.Gallery(value=fl, selected_index=sel)
++        except Exception:
++            return gr.update()
++
++    # Wire each row
++    for row_idx, r in enumerate(ui.rows):
++        # Favorite toggle
++        r.fav_btn.click(
++            fn=_on_favorite,
++            inputs=[r.path_state, *filter_inputs],
++            outputs=all_outputs,
++            show_progress="hidden",
++        )
++        # Play (push to top Gallery)
++        r.play_btn.click(
++            fn=_on_play,
++            inputs=[state, r.path_state, r.exists_state],
++            outputs=[top_gallery, last_choice],
++            show_progress="hidden",
++        )
++        # Extract Settings — emit hidden trigger
++        r.extract_btn.click(
++            fn=_on_action_with_trigger,
++            inputs=[state, r.path_state, r.exists_state],
++            outputs=[top_gallery, last_choice, ui.extract_trigger],
++            show_progress="hidden",
++        )
++        # To Video Source
++        r.to_source_btn.click(
++            fn=_on_action_with_trigger,
++            inputs=[state, r.path_state, r.exists_state],
++            outputs=[top_gallery, last_choice, ui.to_source_trigger],
++            show_progress="hidden",
++        )
++        # To Control Video
++        r.to_control_btn.click(
++            fn=_on_action_with_trigger,
++            inputs=[state, r.path_state, r.exists_state],
++            outputs=[top_gallery, last_choice, ui.to_control_trigger],
++            show_progress="hidden",
++        )
++        # Delete: handler factory includes the row index
++        r.delete_btn.click(
++            fn=_delete_row_action(row_idx),
++            inputs=[state, r.path_state, r.delete_armed_state, *filter_inputs],
++            outputs=[top_gallery, *all_outputs],
++            show_progress="hidden",
++        )
++
++
++def initial_render(ui: HistoryBrowserUI):
++    """Render the first page at app load (and populate filter choices)."""
++    return _render_page(ui, 0, False, [], [], "")
++
++
++def initial_render_outputs(ui: HistoryBrowserUI) -> list[Any]:
++    return _render_outputs(ui)
+diff --git a/shared/utils/gallery_push.py b/shared/utils/gallery_push.py
+new file mode 100644
+index 0000000..5c6e39f
+--- /dev/null
++++ b/shared/utils/gallery_push.py
+@@ -0,0 +1,53 @@
++"""Helper to promote a historical entry into the running top Gallery.
++
++Used by the history browser so row clicks reuse wgp.py's existing Gallery
++handlers (Extract Settings, To Video Source, To Control Video) without
++duplicating their logic: we simply ensure the chosen file is present in the
++live in-memory ``gen["file_list"]`` and point the selection at it, then fire
++the existing handler chain.
++"""
++
++from __future__ import annotations
++
++from typing import Any
++
++
++def push_to_top_gallery(gen: dict[str, Any], path: str, settings: Any) -> int:
++    """Ensure ``path`` is present in ``gen["file_list"]`` and select it.
++
++    If the path is already present, its existing settings are kept untouched
++    (we never overwrite in-memory settings the user might be working with).
++    Otherwise the entry is appended with the provided settings.
++
++    Returns the selected index within ``gen["file_list"]``.
++    """
++    if not isinstance(gen, dict):
++        raise ValueError("gen must be a dict")
++    if not isinstance(path, str) or not path:
++        raise ValueError("path must be a non-empty string")
++
++    file_list = gen.get("file_list")
++    if not isinstance(file_list, list):
++        file_list = []
++        gen["file_list"] = file_list
++    file_settings_list = gen.get("file_settings_list")
++    if not isinstance(file_settings_list, list):
++        file_settings_list = []
++        gen["file_settings_list"] = file_settings_list
++
++    try:
++        idx = file_list.index(path)
++    except ValueError:
++        file_list.append(path)
++        file_settings_list.append(settings if isinstance(settings, dict) else None)
++        idx = len(file_list) - 1
++
++    # Pad settings list if it's out of sync for any reason.
++    while len(file_settings_list) < len(file_list):
++        file_settings_list.append(None)
++
++    gen["selected"] = idx
++    # User made an explicit selection; don't auto-snap to "latest" on refresh.
++    gen["last_selected"] = False
++    gen["selected_video_time"] = 0.0
++    return idx
+diff --git a/shared/utils/history_persistence.py b/shared/utils/history_persistence.py
+new file mode 100644
+index 0000000..6709fba
+--- /dev/null
++++ b/shared/utils/history_persistence.py
+@@ -0,0 +1,341 @@
++"""Persistent history of generated media and their creation metadata.
++
++Keeps a JSON sidecar so the Gradio gallery (Media Info / Late Post Processing /
++Import Media) survives app restarts. Nothing here raises: failures are logged
++and the app continues with an empty or partial history.
++
++The JSON is stored in the app's save_path (e.g. ``outputs/``) which is
++gitignored, so it persists across `git pull` from the upstream public repo.
++
++Schema:
++    schema_version: 2
++    video_entries / audio_entries: list of
++        {
++          "path": str,
++          "settings": dict | None,
++          "favorite": bool,
++        }
++"""
++
++from __future__ import annotations
++
++import json
++import os
++import tempfile
++import threading
++from typing import Any
++
++_HISTORY_FILENAME = "_wangp_history.json"
++_SCHEMA_VERSION = 2
++
++_lock = threading.Lock()
++_history_path: str | None = None
++_loaded: bool = False
++_video_entries: list[dict[str, Any]] = []
++_audio_entries: list[dict[str, Any]] = []
++
++
++def _log(msg: str) -> None:
++    try:
++        print(f"[history_persistence] {msg}")
++    except Exception:
++        pass
++
++
++def init_history_store(save_dir: str | None) -> None:
++    """Set the directory where the JSON lives and load existing entries.
++
++    Safe to call multiple times; subsequent calls re-point the store only if
++    the directory differs and reload from the new location.
++    """
++    global _history_path, _loaded, _video_entries, _audio_entries
++    with _lock:
++        try:
++            if save_dir is None:
++                save_dir = os.path.join(os.getcwd(), "outputs")
++            try:
++                os.makedirs(save_dir, exist_ok=True)
++            except Exception as exc:
++                _log(f"Could not create save_dir {save_dir!r}: {exc}")
++            new_path = os.path.join(save_dir, _HISTORY_FILENAME)
++            if _loaded and new_path == _history_path:
++                return
++            _history_path = new_path
++            _video_entries, _audio_entries = _read_from_disk(new_path)
++            _loaded = True
++        except Exception as exc:
++            _log(f"init_history_store failed: {exc}")
++            _history_path = None
++            _video_entries = []
++            _audio_entries = []
++            _loaded = True
++
++
++def get_history_path() -> str | None:
++    return _history_path
++
++
++def _normalize_entry(e: Any) -> dict[str, Any] | None:
++    if not isinstance(e, dict):
++        return None
++    path = e.get("path")
++    if not isinstance(path, str) or not path:
++        return None
++    cfg = e.get("settings")
++    fav = bool(e.get("favorite", False))
++    return {
++        "path": path,
++        "settings": cfg if isinstance(cfg, dict) else None,
++        "favorite": fav,
++    }
++
++
++def _read_from_disk(path: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
++    if not path or not os.path.isfile(path):
++        return [], []
++    try:
++        with open(path, "r", encoding="utf-8") as f:
++            data = json.load(f)
++    except Exception as exc:
++        _log(f"Failed to read {path!r}: {exc}. Starting empty.")
++        return [], []
++    if not isinstance(data, dict):
++        _log(f"{path!r} has unexpected structure; starting empty.")
++        return [], []
++    raw_videos = data.get("video_entries") or []
++    raw_audios = data.get("audio_entries") or []
++    videos = [v for v in (_normalize_entry(e) for e in raw_videos) if v is not None]
++    audios = [v for v in (_normalize_entry(e) for e in raw_audios) if v is not None]
++    return videos, audios
++
++
++def _write_to_disk_locked() -> None:
++    """Atomic write. Caller must hold ``_lock``."""
++    if _history_path is None:
++        return
++    data = {
++        "schema_version": _SCHEMA_VERSION,
++        "video_entries": _video_entries,
++        "audio_entries": _audio_entries,
++    }
++    try:
++        target_dir = os.path.dirname(_history_path) or "."
++        os.makedirs(target_dir, exist_ok=True)
++        fd, tmp_path = tempfile.mkstemp(prefix="._wangp_history_", suffix=".json", dir=target_dir)
++        try:
++            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
++                json.dump(data, tmp, indent=2, default=str)
++            os.replace(tmp_path, _history_path)
++        except Exception:
++            try:
++                os.remove(tmp_path)
++            except Exception:
++                pass
++            raise
++    except Exception as exc:
++        _log(f"Failed to write {_history_path!r}: {exc}")
++
++
++def _entries_for(audio: bool) -> list[dict[str, Any]]:
++    return _audio_entries if audio else _video_entries
++
++
++def load_entries(audio: bool = False) -> tuple[list[str], list[dict[str, Any] | None]]:
++    """Return (paths, settings_list) filtered to files that still exist on disk.
++
++    Used to seed the top Gallery. The history browser uses
++    ``snapshot_entries()`` instead so it can still display entries whose
++    underlying file is missing.
++    """
++    with _lock:
++        entries = _entries_for(audio)
++        paths: list[str] = []
++        settings: list[dict[str, Any] | None] = []
++        for e in entries:
++            path = e.get("path")
++            if not isinstance(path, str):
++                continue
++            try:
++                exists = os.path.isfile(path)
++            except Exception:
++                exists = False
++            if not exists:
++                continue
++            cfg = e.get("settings")
++            paths.append(path)
++            settings.append(cfg if isinstance(cfg, dict) else None)
++        return paths, settings
++
++
++def snapshot_entries(audio: bool = False) -> list[dict[str, Any]]:
++    """Return a shallow copy of all entries (including missing-file ones).
++
++    Each entry: {path, settings, favorite, exists}. Caller must not mutate.
++    """
++    with _lock:
++        out: list[dict[str, Any]] = []
++        for e in _entries_for(audio):
++            path = e.get("path")
++            if not isinstance(path, str) or not path:
++                continue
++            try:
++                exists = os.path.isfile(path)
++            except Exception:
++                exists = False
++            out.append({
++                "path": path,
++                "settings": e.get("settings") if isinstance(e.get("settings"), dict) else None,
++                "favorite": bool(e.get("favorite", False)),
++                "exists": exists,
++            })
++        return out
++
++
++def append_entry(path: str, settings: Any, *, audio: bool = False) -> None:
++    if not isinstance(path, str) or not path:
++        return
++    with _lock:
++        try:
++            entries = _entries_for(audio)
++            safe_settings = settings if isinstance(settings, dict) else None
++            for e in entries:
++                if e.get("path") == path:
++                    if safe_settings is not None:
++                        e["settings"] = safe_settings
++                    _write_to_disk_locked()
++                    return
++            entries.append({"path": path, "settings": safe_settings, "favorite": False})
++            _write_to_disk_locked()
++        except Exception as exc:
++            _log(f"append_entry failed for {path!r}: {exc}")
++
++
++def replace_last_entry(new_path: str, new_settings: Any, *, audio: bool = False) -> None:
++    """Used when a sliding-window output replaces the previous last file."""
++    if not isinstance(new_path, str) or not new_path:
++        return
++    with _lock:
++        try:
++            entries = _entries_for(audio)
++            safe_settings = new_settings if isinstance(new_settings, dict) else None
++            if entries:
++                # Preserve favorite state across sliding-window replace.
++                prev_fav = bool(entries[-1].get("favorite", False))
++                entries[-1] = {"path": new_path, "settings": safe_settings, "favorite": prev_fav}
++            else:
++                entries.append({"path": new_path, "settings": safe_settings, "favorite": False})
++            _write_to_disk_locked()
++        except Exception as exc:
++            _log(f"replace_last_entry failed for {new_path!r}: {exc}")
++
++
++def remove_entry(path: str, *, audio: bool = False) -> None:
++    """Remove the JSON entry only (does not touch the file on disk)."""
++    if not isinstance(path, str) or not path:
++        return
++    with _lock:
++        try:
++            entries = _entries_for(audio)
++            before = len(entries)
++            entries[:] = [e for e in entries if e.get("path") != path]
++            if len(entries) != before:
++                _write_to_disk_locked()
++        except Exception as exc:
++            _log(f"remove_entry failed for {path!r}: {exc}")
++
++
++def delete_entry(path: str, *, audio: bool = False, delete_file: bool = True, thumb_cb=None) -> bool:
++    """Delete the JSON entry plus the underlying file (if present) and its thumbnail.
++
++    ``thumb_cb`` is an optional ``callable(path) -> None`` that the caller
++    can pass to also wipe cached thumbnails. Returns True if the entry was
++    found and removed from the JSON.
++    """
++    if not isinstance(path, str) or not path:
++        return False
++    removed = False
++    with _lock:
++        try:
++            entries = _entries_for(audio)
++            before = len(entries)
++            entries[:] = [e for e in entries if e.get("path") != path]
++            removed = len(entries) != before
++            if removed:
++                _write_to_disk_locked()
++        except Exception as exc:
++            _log(f"delete_entry (json remove) failed for {path!r}: {exc}")
++    if delete_file:
++        try:
++            if os.path.isfile(path):
++                os.remove(path)
++        except Exception as exc:
++            _log(f"delete_entry (file remove) failed for {path!r}: {exc}")
++    if thumb_cb is not None:
++        try:
++            thumb_cb(path)
++        except Exception as exc:
++            _log(f"delete_entry (thumb cleanup) failed for {path!r}: {exc}")
++    return removed
++
++
++def toggle_favorite(path: str, *, audio: bool = False) -> bool:
++    """Flip the favorite flag for ``path``. Returns the new value (or False if
++    the entry was not found)."""
++    if not isinstance(path, str) or not path:
++        return False
++    with _lock:
++        try:
++            entries = _entries_for(audio)
++            for e in entries:
++                if e.get("path") == path:
++                    new_val = not bool(e.get("favorite", False))
++                    e["favorite"] = new_val
++                    _write_to_disk_locked()
++                    return new_val
++        except Exception as exc:
++            _log(f"toggle_favorite failed for {path!r}: {exc}")
++    return False
++
++
++def set_favorite(path: str, value: bool, *, audio: bool = False) -> None:
++    if not isinstance(path, str) or not path:
++        return
++    with _lock:
++        try:
++            entries = _entries_for(audio)
++            for e in entries:
++                if e.get("path") == path:
++                    e["favorite"] = bool(value)
++                    _write_to_disk_locked()
++                    return
++        except Exception as exc:
++            _log(f"set_favorite failed for {path!r}: {exc}")
++
++
++def sync_from_lists(file_list: list[str] | None, file_settings_list: list[Any] | None, *, audio: bool = False) -> None:
++    """Replace the persisted list for the given kind with the provided lists.
++
++    Used by bulk operations (import, clear_deleted) where a per-item diff
++    would be more fragile than a full rewrite. Preserves the ``favorite`` flag
++    for paths that survive the sync.
++    """
++    with _lock:
++        try:
++            target = _entries_for(audio)
++            prev_fav = {e.get("path"): bool(e.get("favorite", False)) for e in target if isinstance(e.get("path"), str)}
++            new_entries: list[dict[str, Any]] = []
++            paths = file_list or []
++            settings = file_settings_list or []
++            for i, path in enumerate(paths):
++                if not isinstance(path, str) or not path:
++                    continue
++                cfg = settings[i] if i < len(settings) else None
++                new_entries.append({
++                    "path": path,
++                    "settings": cfg if isinstance(cfg, dict) else None,
++                    "favorite": prev_fav.get(path, False),
++                })
++            target[:] = new_entries
++            _write_to_disk_locked()
++        except Exception as exc:
++            _log(f"sync_from_lists failed (audio={audio}): {exc}")
+diff --git a/shared/utils/video_thumbs.py b/shared/utils/video_thumbs.py
+new file mode 100644
+index 0000000..5ea4e46
+--- /dev/null
++++ b/shared/utils/video_thumbs.py
+@@ -0,0 +1,97 @@
++"""Cached thumbnail extraction for the history browser.
++
++Extracts frame 0 of a video via ffmpeg, scales it down, and caches as JPEG
++under ``<save_dir>/_thumbs/``. Safe on failure: logs and returns None.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import os
++import subprocess
++from typing import Optional
++
++_THUMB_DIRNAME = "_thumbs"
++_THUMB_WIDTH = 256
++_DEFAULT_TIMEOUT_S = 20
++
++
++def _log(msg: str) -> None:
++    try:
++        print(f"[video_thumbs] {msg}")
++    except Exception:
++        pass
++
++
++def thumbs_dir(save_dir: str) -> str:
++    return os.path.join(save_dir, _THUMB_DIRNAME)
++
++
++def thumb_path_for(video_path: str, save_dir: str) -> str:
++    base = os.path.basename(video_path)
++    name, _ = os.path.splitext(base)
++    # Prefix with a hash so different files with the same basename don't
++    # collide, and truncate the human-readable tail so Windows path limits
++    # are not an issue.
++    h = hashlib.md5(video_path.encode("utf-8", errors="ignore")).hexdigest()[:10]
++    safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
++    return os.path.join(thumbs_dir(save_dir), f"{h}_{safe_name}.jpg")
++
++
++def get_or_make_thumbnail(video_path: str, save_dir: str, width: int = _THUMB_WIDTH) -> Optional[str]:
++    """Return a path to a cached thumbnail, generating it if missing.
++
++    Returns None if the source file is absent, the extraction fails, or
++    ffmpeg is unavailable.
++    """
++    try:
++        if not isinstance(video_path, str) or not video_path:
++            return None
++        if not os.path.isfile(video_path):
++            return None
++        out_path = thumb_path_for(video_path, save_dir)
++        if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
++            return out_path
++        os.makedirs(os.path.dirname(out_path), exist_ok=True)
++        cmd = [
++            "ffmpeg",
++            "-hide_banner",
++            "-loglevel", "error",
++            "-y",
++            "-ss", "0",
++            "-i", video_path,
++            "-vframes", "1",
++            "-vf", f"scale={width}:-2",
++            "-q:v", "4",
++            out_path,
++        ]
++        result = subprocess.run(
++            cmd,
++            capture_output=True,
++            timeout=_DEFAULT_TIMEOUT_S,
++        )
++        if result.returncode != 0:
++            _log(f"ffmpeg exited {result.returncode} for {video_path!r}: {result.stderr.decode(errors='ignore')[:200]}")
++            return None
++        if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
++            return out_path
++        return None
++    except FileNotFoundError:
++        _log("ffmpeg not found on PATH; thumbnails disabled")
++        return None
++    except subprocess.TimeoutExpired:
++        _log(f"ffmpeg timed out for {video_path!r}")
++        return None
++    except Exception as exc:
++        _log(f"thumbnail generation failed for {video_path!r}: {exc}")
++        return None
++
++
++def delete_thumbnail_for(video_path: str, save_dir: str) -> None:
++    """Best-effort cleanup of a single cached thumbnail."""
++    try:
++        p = thumb_path_for(video_path, save_dir)
++        if os.path.isfile(p):
++            os.remove(p)
++    except Exception as exc:
++        _log(f"delete_thumbnail_for {video_path!r} failed: {exc}")
+diff --git a/wgp.py b/wgp.py
+index 45579c2..2da7a5d 100644
+--- a/wgp.py
++++ b/wgp.py
+@@ -46,6 +46,8 @@ from shared.utils.audio_video import extract_audio_tracks, combine_video_with_au
+ from shared.utils.audio_video import append_sliding_window_audio, read_image_metadata, extract_audio_track_to_wav, write_wav_file, save_audio_file, get_audio_codec_extension, create_silent_wav_file
+ from shared.utils.audio_metadata import read_audio_metadata, extract_creation_datetime_from_metadata, resolve_audio_creation_datetime
+ from shared.utils.media_recording import record_file_metadata as shared_record_file_metadata
++from shared.utils import history_persistence as _history_persistence
++from shared.components import history_browser as _history_browser
+ from shared.utils.virtual_media import get_virtual_image, get_virtual_media_vsource, parse_virtual_media_path, replace_virtual_media_source, strip_virtual_media_suffix
+ from shared.match_archi import match_nvidia_architecture
+ from shared.attention import get_attention_modes, get_supported_attention_modes
+@@ -2785,6 +2787,10 @@ reload_needed = False
+ save_path = server_config.get("save_path", os.path.join(os.getcwd(), "outputs"))
+ image_save_path = server_config.get("image_save_path", os.path.join(os.getcwd(), "outputs"))
+ audio_save_path = server_config.get("audio_save_path", save_path)
++try:
++    _history_persistence.init_history_store(save_path)
++except Exception as _exc:
++    print(f"[history_persistence] init failed: {_exc}")
+ if not "video_output_codec" in server_config: server_config["video_output_codec"]= "libx264_8"
+ if not "video_container" in server_config: server_config["video_container"]= "mp4"
+ if not "embed_source_images" in server_config: server_config["embed_source_images"]= False
+@@ -3892,7 +3898,7 @@ def finalize_generation(state):
+     gen_in_progress = False
+     gen["early_stop"] = False
+     gen["early_stop_forwarded"] = False
+-    return gallery_tabs, 1 if last_was_audio else 0, gr.update() if last_was_audio else gr.Gallery(selected_index=choice),  *pack_audio_gallery_state(audio_file_list, audio_choice), gr.Button(interactive=  True), gr.Button(interactive=  True, visible= False), gr.Button(visible= True), gr.Button(visible= False), gr.Column(visible= False), gr.HTML(visible= False, value="")
++    return gallery_tabs, 1 if last_was_audio else 0, gr.update() if last_was_audio else gr.Gallery(value=gen.get("file_list", []), selected_index=choice),  *pack_audio_gallery_state(audio_file_list, audio_choice), gr.Button(interactive=  True), gr.Button(interactive=  True, visible= False), gr.Button(visible= True), gr.Button(visible= False), gr.Column(visible= False), gr.HTML(visible= False, value="")
+ 
+ def get_default_video_info():
+     return "Please Select an Video / Image"    
+@@ -5207,6 +5213,10 @@ def edit_video(
+             with lock:
+                 file_list.append(new_video_path)
+                 file_settings_list.append(configs)
++            try:
++                _history_persistence.append_entry(new_video_path, configs, audio=False)
++            except Exception as _hp_exc:
++                print(f"[history_persistence] post-processing append hook failed: {_hp_exc}")
+ 
+             if configs != None:
+                 from shared.utils.video_metadata import extract_source_images, save_video_metadata
+@@ -5609,7 +5619,21 @@ def get_output_filepath(file_path, is_image, audio_only):
+ 
+ 
+ def record_file_metadata(video_path, configs, is_image, audio_only, gen, embedded_images=None, replace_last_file=False):
+-    return shared_record_file_metadata(video_path, configs, is_image, audio_only, gen, get_processed_queue=get_processed_queue, metadata_choice=server_config.get("metadata_type", "metadata"), embedded_images=embedded_images, replace_last_file=replace_last_file, lock=lock, verbose_level=verbose_level)
++    result = shared_record_file_metadata(video_path, configs, is_image, audio_only, gen, get_processed_queue=get_processed_queue, metadata_choice=server_config.get("metadata_type", "metadata"), embedded_images=embedded_images, replace_last_file=replace_last_file, lock=lock, verbose_level=verbose_level)
++    try:
++        paths = [video_path] if not isinstance(video_path, list) else list(video_path)
++        for idx, path in enumerate(paths):
++            if not isinstance(path, str) or not path:
++                continue
++            if audio_only:
++                _history_persistence.append_entry(path, configs, audio=True)
++            elif replace_last_file and not is_image and idx == 0:
++                _history_persistence.replace_last_entry(path, configs, audio=False)
++            else:
++                _history_persistence.append_entry(path, configs, audio=False)
++    except Exception as _hp_exc:
++        print(f"[history_persistence] record_file_metadata hook failed: {_hp_exc}")
++    return result
+ 
+ 
+ def generate_video(
+@@ -8258,8 +8282,12 @@ def clear_deleted_files(state, audio_files):
+             if os.path.isfile(file_path):
+                 new_file_list.append(file_path)
+                 new_file_settings_list.append(file_settings)
+-        file_list[:]=new_file_list 
+-        file_settings_list[:]=new_file_settings_list 
++        file_list[:]=new_file_list
++        file_settings_list[:]=new_file_settings_list
++    try:
++        _history_persistence.sync_from_lists(file_list, file_settings_list, audio=audio_files)
++    except Exception as _hp_exc:
++        print(f"[history_persistence] clear_deleted_files hook failed: {_hp_exc}")
+ 
+ def eject_video_from_gallery(state, input_file_list, choice):
+     gen = get_gen_info(state)
+@@ -8276,6 +8304,10 @@ def eject_video_from_gallery(state, input_file_list, choice):
+         file_settings_list[:] = file_settings_list[:choice]
+         file_settings_list.extend(extend_list)
+         choice = min(choice, len(file_list))
++    try:
++        _history_persistence.sync_from_lists(file_list, file_settings_list, audio=False)
++    except Exception as _hp_exc:
++        print(f"[history_persistence] eject_video hook failed: {_hp_exc}")
+     return gr.Gallery(value = file_list, selected_index= choice), gr.update() if len(file_list) >0 else get_default_video_info(), gr.Row(visible= len(file_list) > 0)
+ 
+ def eject_audio_from_gallery(state, input_file_list, choice):
+@@ -8293,6 +8325,10 @@ def eject_audio_from_gallery(state, input_file_list, choice):
+         file_settings_list[:] = file_settings_list[:choice]
+         file_settings_list.extend(extend_list)
+         choice = min(choice, len(file_list)-1)
++    try:
++        _history_persistence.sync_from_lists(file_list, file_settings_list, audio=True)
++    except Exception as _hp_exc:
++        print(f"[history_persistence] eject_audio hook failed: {_hp_exc}")
+     return *pack_audio_gallery_state(file_list, choice), gr.update() if len(file_list) >0 else get_default_video_info(), gr.Row(visible= len(file_list) > 0)
+ 
+ 
+@@ -8336,6 +8372,10 @@ def add_videos_to_gallery(state, input_file_list, choice, audio_files_paths, aud
+                 new_video= True
+                 file_list.append(file_path)
+                 file_settings_list.append(file_settings)
++            try:
++                _history_persistence.append_entry(file_path, file_settings, audio=bool(audio_file))
++            except Exception as _hp_exc:
++                print(f"[history_persistence] add_videos_to_gallery hook failed: {_hp_exc}")
+             valid_files_count +=1
+ 
+     if valid_files_count== 0 and invalid_files_count ==0:
+@@ -9625,6 +9665,21 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
+         state_dict["last_resolution_per_group"] = server_config.get("last_resolution_per_group", {})
+         gen = dict()
+         gen["queue"] = []
++        try:
++            _persisted_video_paths, _persisted_video_settings = _history_persistence.load_entries(audio=False)
++            _persisted_audio_paths, _persisted_audio_settings = _history_persistence.load_entries(audio=True)
++        except Exception as _hp_exc:
++            print(f"[history_persistence] load_entries failed: {_hp_exc}")
++            _persisted_video_paths, _persisted_video_settings = [], []
++            _persisted_audio_paths, _persisted_audio_settings = [], []
++        gen["file_list"] = list(_persisted_video_paths)
++        gen["file_settings_list"] = list(_persisted_video_settings)
++        gen["audio_file_list"] = list(_persisted_audio_paths)
++        gen["audio_file_settings_list"] = list(_persisted_audio_settings)
++        if gen["file_list"]:
++            gen["selected"] = len(gen["file_list"]) - 1
++        if gen["audio_file_list"]:
++            gen["audio_selected"] = len(gen["audio_file_list"]) - 1
+         state_dict["gen"] = gen
+ 
+     def ui_get(key, default = None):
+@@ -10857,13 +10912,20 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
+                 status_trigger = gr.Text(interactive= False, visible=False, elem_id="wangp_main_status_trigger" if main_bridge_elem_ids else None)
+                 load_queue_trigger = gr.Text(interactive= False, visible=False, elem_id="wangp_main_load_queue_trigger" if main_bridge_elem_ids else None)
+                 abort_client_id= gr.Text(interactive= False, visible=False, elem_id="wangp_main_abort_client_id" if main_bridge_elem_ids else None)
+-                default_files = []
++                try:
++                    default_files = list(state_dict.get("gen", {}).get("file_list", []))
++                    default_audio_files = list(state_dict.get("gen", {}).get("audio_file_list", []))
++                except Exception as _hp_exc:
++                    print(f"[history_persistence] default gallery seed failed: {_hp_exc}")
++                    default_files = []
++                    default_audio_files = []
++                default_selected_video_index = max(len(default_files) - 1, 0) if default_files else 0
+                 current_gallery_tab = gr.Number(0, visible=False)
+                 with gr.Tabs() as gallery_tabs:
+                     with gr.Tab("Video / Images Gallery", id="video_images"):
+-                        output = gr.Gallery(value =default_files, label="Generated videos", preview= True, show_label=False, elem_id="gallery" , columns=[3], rows=[1], object_fit="contain", height=450, selected_index=0, interactive= False)
++                        output = gr.Gallery(value =default_files, label="Generated videos", preview= True, show_label=False, elem_id="gallery" , columns=[3], rows=[1], object_fit="contain", height=450, selected_index=default_selected_video_index, interactive= False)
+                     with gr.Tab("Audio Files Gallery", id="audio"):
+-                        output_audio = AudioGallery(audio_paths=[], max_thumbnails=999, height=40, update_only=update_form)
++                        output_audio = AudioGallery(audio_paths=default_audio_files, max_thumbnails=999, height=40, update_only=update_form)
+                         audio_files_paths, audio_file_selected, audio_gallery_refresh_trigger = output_audio.get_state()
+                 output_trigger = gr.Text(interactive= False, visible=False, elem_id="wangp_main_output_trigger" if main_bridge_elem_ids else None)
+                 selected_video_time_input = gr.Text(interactive= False, visible=False, elem_id="selected_video_time_input" if main_bridge_elem_ids else None)
+@@ -10976,6 +11038,15 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
+                         hidden_force_quit_trigger = gr.Button("force_quit", visible=False, elem_id="force_quit_btn_hidden")
+                         hidden_countdown_state = gr.Number(value=-1, visible=False, elem_id="hidden_countdown_state_num")
+                         single_hidden_trigger_btn = gr.Button("trigger_countdown", visible=False, elem_id="trigger_info_single_btn")
++                try:
++                    history_ui = _history_browser.build_ui(
++                        save_dir=save_path,
++                        missing_placeholder=os.path.join("icons", "missing_video.png"),
++                        accordion_label="Full History",
++                    )
++                except Exception as _hb_exc:
++                    print(f"[history_browser] build_ui failed: {_hb_exc}")
++                    history_ui = None
+ 
+         extra_inputs = prompt_vars + [wizard_prompt, wizard_variables_var, wizard_prompt_activated_var, video_prompt_column, image_prompt_column, image_prompt_type_group, image_prompt_type_radio, image_prompt_type_endcheckbox,
+                                       prompt_column_advanced, prompt_column_wizard_vars, prompt_column_wizard, alt_prompt_row, lset_name, save_lset_prompt_drop, advanced_row, speed_tab, audio_tab, mmaudio_col, quality_tab,
+@@ -11107,7 +11178,10 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
+             save_settings_btn.click( fn=validate_wizard_prompt, inputs =[state, wizard_prompt_activated_var, wizard_variables_var,  prompt, wizard_prompt, *prompt_vars] , outputs= [prompt]).then(
+                 save_inputs, inputs =[target_settings] + gen_inputs, outputs = [])
+ 
+-            gr.on( triggers=[video_info_extract_settings_btn.click, video_info_extract_image_settings_btn.click], fn=validate_wizard_prompt,
++            _extract_triggers = [video_info_extract_settings_btn.click, video_info_extract_image_settings_btn.click]
++            if history_ui is not None:
++                _extract_triggers.append(history_ui.extract_trigger.change)
++            gr.on( triggers=_extract_triggers, fn=validate_wizard_prompt,
+                 inputs= [state, wizard_prompt_activated_var, wizard_variables_var,  prompt, wizard_prompt, *prompt_vars] ,
+                 outputs= [prompt],
+                 show_progress="hidden",
+@@ -11177,8 +11251,13 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
+                     show_progress="hidden",
+                 )
+             gr.on(triggers=[video_info_eject_video_btn.click, video_info_eject_video2_btn.click, video_info_eject_video3_btn.click, video_info_eject_deleted_video_btn.click,  video_info_eject_image_btn.click], fn=eject_video_from_gallery, inputs =[state, output, last_choice], outputs = [output, video_info, video_buttons_row] )
+-            video_info_to_control_video_btn.click(fn=video_to_control_video, inputs =[state, output, last_choice], outputs = [video_guide] )            
+-            video_info_to_video_source_btn.click(fn=video_to_source_video, inputs =[state, output, last_choice], outputs = [video_source] )
++            _to_control_triggers = [video_info_to_control_video_btn.click]
++            _to_source_triggers = [video_info_to_video_source_btn.click]
++            if history_ui is not None:
++                _to_control_triggers.append(history_ui.to_control_trigger.change)
++                _to_source_triggers.append(history_ui.to_source_trigger.change)
++            gr.on(triggers=_to_control_triggers, fn=video_to_control_video, inputs =[state, output, last_choice], outputs = [video_guide] )
++            gr.on(triggers=_to_source_triggers, fn=video_to_source_video, inputs =[state, output, last_choice], outputs = [video_source] )
+             video_info_to_start_image_btn.click(fn=image_to_ref_image_add, inputs =[state, output, last_choice, image_start, gr.State("Start Image")], outputs = [image_start] )
+             video_info_to_end_image_btn.click(fn=image_to_ref_image_add, inputs =[state, output, last_choice, image_end, gr.State("End Image")], outputs = [image_end] )
+             video_info_to_image_guide_btn.click(fn=image_to_ref_image_guide, inputs =[state, output, last_choice], outputs = [image_guide, image_mask_guide]).then(fn=None, inputs=[], outputs=[], js=click_brush_js )
+@@ -11192,6 +11271,25 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
+ 
+             video_info_postprocessing_btn.click(fn=apply_post_processing, inputs =[state, output, last_choice, PP_temporal_upsampling, PP_spatial_upsampling, PP_film_grain_intensity, PP_film_grain_saturation], outputs = [mode, generate_trigger, add_to_queue_trigger ] )
+             video_info_remux_audio_btn.click(fn=remux_audio, inputs =[state, output, last_choice, PP_MMAudio_setting, PP_MMAudio_prompt, PP_MMAudio_neg_prompt, PP_MMAudio_seed, PP_repeat_generation, PP_custom_audio], outputs = [mode, generate_trigger, add_to_queue_trigger ] )
++            if history_ui is not None:
++                try:
++                    _history_browser.wire_events(
++                        history_ui,
++                        state=state,
++                        top_gallery=output,
++                        last_choice=last_choice,
++                        output_trigger=output_trigger,
++                        get_gen_info=get_gen_info,
++                    )
++                    main.load(
++                        fn=lambda: _history_browser.initial_render(history_ui),
++                        inputs=[],
++                        outputs=_history_browser.initial_render_outputs(history_ui),
++                        queue=False,
++                        show_progress="hidden",
++                    )
++                except Exception as _hb_exc:
++                    print(f"[history_browser] wire_events failed: {_hb_exc}")
+             save_lset_btn.click(validate_save_lset, inputs=[state, lset_name], outputs=[apply_lset_btn, refresh_lora_btn, delete_lset_btn, save_lset_btn,confirm_save_lset_btn, cancel_lset_btn, save_lset_prompt_drop])
+             delete_lset_btn.click(validate_delete_lset, inputs=[state, lset_name], outputs=[apply_lset_btn, refresh_lora_btn, delete_lset_btn, save_lset_btn,confirm_delete_lset_btn, cancel_lset_btn ])
+             confirm_save_lset_btn.click(fn=validate_wizard_prompt, inputs =[state, wizard_prompt_activated_var, wizard_variables_var, prompt, wizard_prompt, *prompt_vars] , outputs= [prompt], show_progress="hidden",).then(
+-- 
+2.52.0.windows.1
+

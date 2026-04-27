@@ -49,3 +49,12 @@ loras_i2v/
 wgp_config.json
 plugins_local.json
 loras_url_cache.json
+inputs
+pocket-tts/ltx inputs/
+.gitignore
+wgp.py
+launch_wan2gp.bat
+shared/utils/history_persistence.py
+Lora Details on Usage.md
+Lora Details on Usage.txt
+wgp.py

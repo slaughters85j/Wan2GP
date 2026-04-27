@@ -1,0 +1,42 @@
+From 3571fe03ad526175a1cb110b0cb673dc553779ed Mon Sep 17 00:00:00 2001
+From: "John S." <john.es.saunders@gmail.com>
+Date: Thu, 23 Apr 2026 19:40:21 -0400
+Subject: [PATCH] Preserve Gallery value on finalize_generation
+
+finalize_generation returned gr.Gallery(selected_index=choice) with no
+value= argument, which Gradio 4 treats as a full component update and
+therefore resets the gallery's value to None. Since finalize_generation
+fires at the end of the queue-resume chain triggered on main.load, any
+gallery items already rendered (including those seeded from an external
+source before the browser attaches) are wiped within ~200ms of page
+load.
+
+Previously harmless because gen["file_list"] was always empty on fresh
+launch, so the reset was "empty -> empty". The bug surfaces as soon as
+anything pre-populates file_list before finalize_generation runs.
+
+Fix: pass the current file_list as value= so Gradio treats the return
+as an equivalent no-op when nothing has changed, and as a correct
+re-assertion otherwise.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ wgp.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/wgp.py b/wgp.py
+index 955ed39..4fa9955 100644
+--- a/wgp.py
++++ b/wgp.py
+@@ -3892,7 +3892,7 @@ def finalize_generation(state):
+     gen_in_progress = False
+     gen["early_stop"] = False
+     gen["early_stop_forwarded"] = False
+-    return gallery_tabs, 1 if last_was_audio else 0, gr.update() if last_was_audio else gr.Gallery(selected_index=choice),  *pack_audio_gallery_state(audio_file_list, audio_choice), gr.Button(interactive=  True), gr.Button(interactive=  True, visible= False), gr.Button(visible= True), gr.Button(visible= False), gr.Column(visible= False), gr.HTML(visible= False, value="")
++    return gallery_tabs, 1 if last_was_audio else 0, gr.update() if last_was_audio else gr.Gallery(value=gen.get("file_list", []), selected_index=choice),  *pack_audio_gallery_state(audio_file_list, audio_choice), gr.Button(interactive=  True), gr.Button(interactive=  True, visible= False), gr.Button(visible= True), gr.Button(visible= False), gr.Column(visible= False), gr.HTML(visible= False, value="")
+ 
+ def get_default_video_info():
+     return "Please Select an Video / Image"    
+-- 
+2.52.0.windows.1
+
