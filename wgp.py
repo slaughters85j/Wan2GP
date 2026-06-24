@@ -10497,6 +10497,44 @@ def refresh_video_length_label(state, current_video_length, force_fps, video_gui
     computed_fps = get_computed_fps(force_fps, base_model_type , video_guide, video_source )
     return gr.update(label= compute_video_length_label(computed_fps, current_video_length))
 
+def update_seconds_from_frames(state, current_video_length, force_fps, video_guide, video_source, current_seconds):
+    """Slider → seconds box. No-ops when the displayed seconds already match
+    the frame count, which prevents the seconds.change ↔ slider.release pair
+    from oscillating."""
+    try:
+        base_model_type = get_base_model_type(get_state_model_type(state))
+        fps = get_computed_fps(force_fps, base_model_type, video_guide, video_source)
+        if not fps or fps <= 0 or current_video_length is None:
+            return gr.update()
+        new_seconds = round(current_video_length / fps, 2)
+        if current_seconds is not None and abs(new_seconds - float(current_seconds)) < 0.01:
+            return gr.update()
+        return new_seconds
+    except Exception:
+        return gr.update()
+
+def update_frames_from_seconds(state, seconds, current_video_length, force_fps, video_guide, video_source):
+    """Seconds box → slider. Snaps the requested duration to the nearest
+    valid frame count for the model's latent-size step, then updates the
+    slider value AND its label in one shot."""
+    try:
+        if seconds is None or float(seconds) <= 0:
+            return gr.update()
+        base_model_type = get_base_model_type(get_state_model_type(state))
+        fps = get_computed_fps(force_fps, base_model_type, video_guide, video_source)
+        if not fps or fps <= 0:
+            return gr.update()
+        min_frames, frames_step, _ = get_model_min_frames_and_step(base_model_type)
+        max_frames = get_max_frames(737 if test_any_sliding_window(base_model_type) else 337)
+        raw = round(float(seconds) * fps)
+        snapped = round((max(min_frames, min(max_frames, raw)) - 1) / frames_step) * frames_step + 1
+        snapped = max(min_frames, min(max_frames, snapped))
+        if snapped == current_video_length:
+            return gr.update()
+        return gr.update(value=snapped, label=compute_video_length_label(fps, snapped))
+    except Exception:
+        return gr.update()
+
 def update_value(prompt_type_value, sub_value, letter_filter):                        
     return del_in_sequence(prompt_type_value, letter_filter) + filter_letters(sub_value, letter_filter)
 
@@ -11383,6 +11421,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                 batch_size = gr.Slider(1, 16, value=ui_get("batch_size"), step=1, label=batch_label, visible = image_outputs, show_reset_button= False)
                 if image_outputs:
                     video_length = gr.Slider(1, 9999, value=ui_get("video_length"), step=1, label="Number of frames", visible = False, show_reset_button= False)
+                    video_length_seconds = gr.Number(value=0.0, label="Seconds", precision=2, minimum=0, step=0.1, visible=False)
                 else:
                     video_length_locked = model_def.get("video_length_locked", None)
                     min_frames, frames_step, _ = get_model_min_frames_and_step(base_model_type)
@@ -11390,8 +11429,10 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                     current_video_length = video_length_locked if video_length_locked is not None else ui_get("video_length", 81 if get_model_family(base_model_type)=="wan" else 97)
 
                     computed_fps = get_computed_fps(ui_get("force_fps"), base_model_type , ui_defaults.get("video_guide", None), ui_defaults.get("video_source", None))
-                    video_length = gr.Slider(0 if audio_only else min_frames, get_max_frames(737 if test_any_sliding_window(base_model_type) else 337), value=current_video_length, 
-                         step=frames_step, label=compute_video_length_label(computed_fps, current_video_length, video_length_locked) , visible = True, interactive= video_length_locked is None, show_reset_button= False)
+                    video_length = gr.Slider(0 if audio_only else min_frames, get_max_frames(737 if test_any_sliding_window(base_model_type) else 337), value=current_video_length,
+                         step=frames_step, label=compute_video_length_label(computed_fps, current_video_length, video_length_locked) , visible = True, interactive= video_length_locked is None, show_reset_button= False, scale=4)
+                    initial_seconds = round(current_video_length / computed_fps, 2) if computed_fps else 0.0
+                    video_length_seconds = gr.Number(value=initial_seconds, label="Seconds", precision=2, minimum=0, step=0.1, interactive= video_length_locked is None, scale=0, min_width=110, visible=True)
 
             with gr.Row(visible = not lock_inference_steps) as inference_steps_row:                                       
                 num_inference_steps = gr.Slider(0 if audio_only else 1, 100, value=ui_get("num_inference_steps"), step=1, label="Number of Inference Steps", visible = True, show_reset_button= False)
@@ -12090,6 +12131,20 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
             gallery_tabs.select(fn=set_gallery_tab, inputs=[state, video_info_tab], outputs=[current_gallery_tab, gallery_source, video_info_tabs, video_info_tab]).then(
                 fn=select_video, inputs=[state, current_gallery_tab, output, last_choice, audio_files_paths, audio_file_selected, gallery_source], outputs=[last_choice, video_info, video_buttons_row, image_buttons_row, audio_buttons_row, deleted_video_buttons_row, deleted_audio_buttons_row, audio_postprocessing_tab, video_postprocessing_tab, audio_remuxing_tab, PP_temporal_upsampling, PP_spatial_upsampling, PP_image_spatial_upsampling], show_progress="hidden")
             gr.on(triggers=[video_length.release, force_fps.change, video_guide.change, video_source.change], fn=refresh_video_length_label, inputs=[state, video_length, force_fps, video_guide, video_source] , outputs = video_length, trigger_mode="always_last", show_progress="hidden"  )
+            gr.on(
+                triggers=[video_length.release, force_fps.change, video_guide.change, video_source.change],
+                fn=update_seconds_from_frames,
+                inputs=[state, video_length, force_fps, video_guide, video_source, video_length_seconds],
+                outputs=video_length_seconds,
+                trigger_mode="always_last",
+                show_progress="hidden",
+            )
+            video_length_seconds.change(
+                fn=update_frames_from_seconds,
+                inputs=[state, video_length_seconds, video_length, force_fps, video_guide, video_source],
+                outputs=video_length,
+                show_progress="hidden",
+            )
             guidance_phases.change(fn=change_guidance_phases, inputs= [state, guidance_phases], outputs =[model_switch_phase, guidance_phases_row, switch_threshold, switch_threshold2, guidance2_scale, guidance3_scale ])
             postprocess_audio.change(fn=refresh_postprocess_audio_choice, inputs=[postprocess_audio], outputs=[mmaudio_col, postprocess_audio_control_col, postprocess_audio_custom_col])
             remove_background_sound.change(fn=refresh_remove_background_sound, inputs=[state, audio_prompt_type, remove_background_sound], outputs=[audio_prompt_type])

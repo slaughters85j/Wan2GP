@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os, io, tempfile, mimetypes, urllib.parse
+from math import gcd
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, Literal
 
 import gradio as gr
@@ -36,6 +37,56 @@ def get_gradio_file_path(item: Any) -> Optional[str]:
 def record_last_action(st, last_action):
     st["last_action"] = last_action
     st["last_time"] = time.time()
+
+
+def _aspect_label(w: int, h: int) -> str:
+    """Return a short aspect-ratio label. Uses gcd when it gives a small
+    ratio (≤32), otherwise approximates against denominators 1..32 within 1%."""
+    if w <= 0 or h <= 0:
+        return ""
+    g = gcd(w, h)
+    rw, rh = w // g, h // g
+    if max(rw, rh) <= 32:
+        return f"{rw}:{rh}"
+    target = w / h
+    best: Optional[Tuple[int, int, float]] = None
+    for d in range(1, 33):
+        n = round(target * d)
+        if n <= 0:
+            continue
+        err = abs(n / d - target) / target
+        if err < 0.01:
+            if best is None or d < best[1]:
+                best = (n, d, err)
+    if best:
+        return f"~{best[0]}:{best[1]}"
+    return f"{rw}:{rh}"
+
+
+def _read_dimensions(path: str, media_mode: str) -> Tuple[int, int]:
+    """(width, height) for the file, or (0, 0) on failure."""
+    try:
+        if media_mode == "video":
+            from shared.utils.utils import get_video_info
+            _fps, w, h, _frames = get_video_info(path)
+            return int(w or 0), int(h or 0)
+        with PILImage.open(path) as img:
+            return int(img.width), int(img.height)
+    except Exception:
+        return 0, 0
+
+
+def _info_markdown_for(path: Optional[str], media_mode: str) -> str:
+    if not path or not isinstance(path, str) or not os.path.isfile(path):
+        return ""
+    w, h = _read_dimensions(path, media_mode)
+    if w <= 0 or h <= 0:
+        return ""
+    label = _aspect_label(w, h)
+    suffix = f" ({label})" if label else ""
+    return f"<span style='opacity:0.85'>**{w}×{h}**{suffix}</span>"
+
+
 class AdvancedMediaGallery:
     def __init__(
         self,
@@ -71,6 +122,7 @@ class AdvancedMediaGallery:
         self.btn_left: Optional[gr.Button] = None
         self.btn_right: Optional[gr.Button] = None
         self.btn_clear: Optional[gr.Button] = None
+        self.info_md: Optional[gr.Markdown] = None
 
         # Single dict state
         self.state: Optional[gr.State] = None
@@ -416,6 +468,19 @@ class AdvancedMediaGallery:
                     selected_index=self._initial_state["selected"],  # server-side selection
                 )
 
+            # Dimensions + aspect ratio of the currently selected item.
+            # Updated after every event that changes selection or items.
+            initial_info = ""
+            try:
+                sel = self._initial_state["selected"]
+                items = self._initial_state["items"] or []
+                if isinstance(sel, int) and 0 <= sel < len(items):
+                    p = self._extract_path(items[sel])
+                    initial_info = _info_markdown_for(p, self.media_mode)
+            except Exception:
+                initial_info = ""
+            self.info_md = gr.Markdown(initial_info, elem_classes=["amg-info"])
+
             # One-line controls
             exts = sorted(IMAGE_EXTS if self.media_mode == "image" else VIDEO_EXTS) if self.accept_filter else None
             with gr.Row(equal_height=True, elem_classes=["amg-controls"]):
@@ -434,68 +499,91 @@ class AdvancedMediaGallery:
 
         return col
 
+    def _info_from_state(self, state):
+        """state → gr.update for self.info_md. Best-effort: returns blank
+        markdown on any failure (missing file, unreadable, etc.)."""
+        try:
+            st = get_state(state)
+            items = st.get("items", []) or []
+            sel = st.get("selected", None)
+            if not isinstance(sel, int) or not (0 <= sel < len(items)):
+                return gr.update(value="")
+            path = self._extract_path(items[sel])
+            return gr.update(value=_info_markdown_for(path, self.media_mode))
+        except Exception:
+            return gr.update(value="")
+
+    def _refresh_info(self, event):
+        """Helper: chain an .then on the given event that refreshes info_md."""
+        return event.then(
+            self._info_from_state,
+            inputs=[self.state],
+            outputs=[self.info_md],
+            show_progress="hidden",
+        )
+
     def _wire_events(self):
         # Selection: mirror into state and keep gallery.selected_index in sync
-        self.gallery.select(
+        self._refresh_info(self.gallery.select(
             self._on_select,
             inputs=[self.state, self.gallery],
             outputs=[self.gallery, self.state],
             trigger_mode="always_last",
-        )
+        ))
 
         # Gallery value changed by user actions (click-to-add, drag-drop, internal remove, etc.)
-        self.gallery.upload(
+        self._refresh_info(self.gallery.upload(
             self._on_upload,
             inputs=[self.gallery, self.state],
             outputs=[self.gallery, self.state],
             trigger_mode="always_last",
-        )
+        ))
 
         # Gallery value changed by user actions (click-to-add, drag-drop, internal remove, etc.)
-        self.gallery.upload(
+        self._refresh_info(self.gallery.upload(
             self._on_gallery_change,
             inputs=[self.gallery, self.state],
             outputs=[self.gallery, self.state],
             trigger_mode="always_last",
-        )
+        ))
 
         # Add via UploadButton
-        self.upload_btn.upload(
+        self._refresh_info(self.upload_btn.upload(
             self._on_add,
             inputs=[self.upload_btn, self.state, self.gallery],
             outputs=[self.gallery, self.state],
             trigger_mode="always_last",
-        )
+        ))
 
         # Remove selected
-        self.btn_remove.click(
+        self._refresh_info(self.btn_remove.click(
             self._on_remove,
             inputs=[self.state, self.gallery],
             outputs=[self.gallery, self.state],
             trigger_mode="always_last",
-        )
+        ))
 
         # Reorder using selected index, keep same item selected
-        self.btn_left.click(
+        self._refresh_info(self.btn_left.click(
             lambda st, gallery: self._on_move(-1, st, gallery),
             inputs=[self.state, self.gallery],
             outputs=[self.gallery, self.state],
             trigger_mode="always_last",
-        )
-        self.btn_right.click(
+        ))
+        self._refresh_info(self.btn_right.click(
             lambda st, gallery: self._on_move(+1, st, gallery),
             inputs=[self.state, self.gallery],
             outputs=[self.gallery, self.state],
             trigger_mode="always_last",
-        )
+        ))
 
         # Clear all
-        self.btn_clear.click(
+        self._refresh_info(self.btn_clear.click(
             self._on_clear,
             inputs=[self.state],
             outputs=[self.gallery, self.state],
             trigger_mode="always_last",
-        )
+        ))
 
     # ---------------- public API ----------------
 
