@@ -267,7 +267,8 @@ class AdvancedMediaGallery:
         last_time = st.get("last_time", None)
         if last_time is not None and abs(time.time()- last_time)< 0.5: # crappy trick to detect if onselect is unwanted (buggy gallery)
             # print(f"ignored:{time.time()}, real {st['selected']}")
-            return gr.update(selected_index=st["selected"]), st
+            info_update = self._info_update_for_state(st)
+            return gr.update(selected_index=st["selected"]), st, info_update
 
         idx = None
         if evt is not None and hasattr(evt, "index"):
@@ -283,7 +284,8 @@ class AdvancedMediaGallery:
         sel = idx if (idx is not None and 0 <= idx < n) else None
         # print(f"image selected evt index:{sel}/{evt.selected}")
         st["selected"] = sel
-        return gr.update(), st
+        info_update = self._info_update_for_state(st)
+        return gr.update(), st, info_update
 
     def _on_upload(self, value: List[Any], state: Dict[str, Any]) :
         # Fires when users upload via the Gallery itself.
@@ -499,17 +501,25 @@ class AdvancedMediaGallery:
 
         return col
 
-    def _info_from_state(self, state):
-        """state → gr.update for self.info_md. Best-effort: returns blank
-        markdown on any failure (missing file, unreadable, etc.)."""
+    def _info_update_for_state(self, st: Dict[str, Any]):
+        """Compute the info_md update from an already-resolved state dict.
+        Used inline from event handlers that already have `st` in scope."""
         try:
-            st = get_state(state)
             items = st.get("items", []) or []
             sel = st.get("selected", None)
             if not isinstance(sel, int) or not (0 <= sel < len(items)):
                 return gr.update(value="")
             path = self._extract_path(items[sel])
             return gr.update(value=_info_markdown_for(path, self.media_mode))
+        except Exception:
+            return gr.update(value="")
+
+    def _info_from_state(self, state):
+        """state → gr.update for self.info_md. Best-effort: returns blank
+        markdown on any failure (missing file, unreadable, etc.). Used by
+        the .then() chains on the user-action handlers."""
+        try:
+            return self._info_update_for_state(get_state(state))
         except Exception:
             return gr.update(value="")
 
@@ -523,13 +533,17 @@ class AdvancedMediaGallery:
         )
 
     def _wire_events(self):
-        # Selection: mirror into state and keep gallery.selected_index in sync
-        self._refresh_info(self.gallery.select(
+        # Selection: mirror into state and keep gallery.selected_index in sync.
+        # The info_md update is folded into _on_select's outputs (no .then()
+        # chain) — Gradio 5.29 replays an initial .select event before the
+        # frontend has bound inputs, and a .then() chain on .select triggers
+        # a "needed 2 inputs, got 0" ValueError during that replay.
+        self.gallery.select(
             self._on_select,
             inputs=[self.state, self.gallery],
-            outputs=[self.gallery, self.state],
+            outputs=[self.gallery, self.state, self.info_md],
             trigger_mode="always_last",
-        ))
+        )
 
         # Gallery value changed by user actions (click-to-add, drag-drop, internal remove, etc.)
         self._refresh_info(self.gallery.upload(

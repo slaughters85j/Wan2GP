@@ -28,6 +28,13 @@ from typing import Any
 _HISTORY_FILENAME = "_wangp_history.json"
 _SCHEMA_VERSION = 2
 
+# Project root is derived from this file's location:
+#   shared/utils/history_persistence.py  →  parents up 2 dirs = project root.
+# This keeps the JSON on the local filesystem regardless of where the user's
+# `save_path` points (network drives are unreliable; the local FS is not).
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_DEFAULT_HISTORY_PATH = os.path.join(_PROJECT_ROOT, _HISTORY_FILENAME)
+
 _lock = threading.Lock()
 _history_path: str | None = None
 _save_dir: str | None = None
@@ -59,25 +66,27 @@ def _norm(path: Any) -> str:
 
 
 def init_history_store(save_dir: str | None) -> None:
-    """Set the directory where the JSON lives and load existing entries.
+    """Locate the on-disk history JSON (always at project root) and load
+    existing entries. ``save_dir`` is recorded for the inventory report only;
+    the file itself lives on the local filesystem so it stays available even
+    when ``save_dir`` is a flaky network share.
 
-    Safe to call multiple times; subsequent calls re-point the store only if
-    the directory differs and reload from the new location.
+    Safe to call multiple times; subsequent calls are no-ops unless the
+    history path itself changes (which it currently never does — the path is
+    derived from this module's own location).
     """
     global _history_path, _save_dir, _loaded, _video_entries, _audio_entries
     with _lock:
         try:
-            if save_dir is None:
-                save_dir = os.path.join(os.getcwd(), "outputs")
-            try:
-                os.makedirs(save_dir, exist_ok=True)
-            except Exception as exc:
-                _log(f"Could not create save_dir {save_dir!r}: {exc}")
-            new_path = os.path.join(save_dir, _HISTORY_FILENAME)
+            _save_dir = save_dir  # purely informational (used by inventory report)
+            new_path = _DEFAULT_HISTORY_PATH
             if _loaded and new_path == _history_path:
                 return
+            try:
+                os.makedirs(os.path.dirname(new_path) or ".", exist_ok=True)
+            except Exception as exc:
+                _log(f"Could not ensure dir for {new_path!r}: {exc}")
             _history_path = new_path
-            _save_dir = save_dir
             _video_entries, _audio_entries = _read_from_disk(new_path)
             _loaded = True
         except Exception as exc:

@@ -47,6 +47,7 @@ loras_i2v/
 wgp_config.json
 plugins_local.json
 loras_url_cache.json
+_wangp_history.json
 inputs
 pocket-tts/ltx inputs/
 .gitignore

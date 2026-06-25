@@ -6935,10 +6935,33 @@ def generate_media(
         reuse_frames = 0
     seed = set_seed(seed)
 
-    torch.set_grad_enabled(False) 
-    os.makedirs(save_path, exist_ok=True)
-    os.makedirs(image_save_path, exist_ok=True)
-    os.makedirs(audio_save_path, exist_ok=True)
+    torch.set_grad_enabled(False)
+    # makedirs on network-redirected paths (e.g. RDP \\tsclient\X) can fail
+    # transiently with WinError 67 when the share blips or hasn't finished
+    # remounting. Exponential backoff up to ~90s total; the share usually
+    # comes back within a few seconds of an RDP wobble, and a generation that
+    # costs minutes of GPU time is worth waiting that long for.
+    def _resilient_makedirs(path, attempts=15, base_delay=0.5, max_delay=10.0):
+        last_exc = None
+        delay = base_delay
+        for i in range(attempts):
+            try:
+                os.makedirs(path, exist_ok=True)
+                if i > 0:
+                    print(f"[resilient_makedirs] reached {path!r} after {i + 1} attempts")
+                return
+            except Exception as exc:
+                last_exc = exc
+                if i == 0:
+                    print(f"[resilient_makedirs] {path!r} unreachable ({type(exc).__name__}); retrying with backoff…")
+                if i < attempts - 1:
+                    time.sleep(min(delay, max_delay))
+                    delay *= 1.5
+        print(f"[resilient_makedirs] gave up on {path!r} after {attempts} attempts")
+        raise last_exc
+    _resilient_makedirs(save_path)
+    _resilient_makedirs(image_save_path)
+    _resilient_makedirs(audio_save_path)
     gc.collect()
     torch.cuda.empty_cache()
     wan_model._interrupt = False
@@ -13291,7 +13314,7 @@ def create_ui():
         gr.Markdown(f"<div align=center><H1>Wan<SUP>GP</SUP> v{WanGP_version} <FONT SIZE=4>by <I>DeepBeepMeep</I></FONT> <FONT SIZE=3>") # (<A HREF='https://github.com/deepbeepmeep/Wan2GP'>Updates</A>)</FONT SIZE=3></H1></div>")
         global model_list
 
-        tab_state = gr.State({ "tab_no":0 }) 
+        tab_state = gr.State({ "tab_no":0 })
         target_edit_state = gr.Text(value = "edit_state", interactive= False, visible= False)
         edit_queue_trigger = gr.Text(value='', interactive= False, visible=False)
         with gr.Tabs(selected="media_gen", ) as main_tabs:
