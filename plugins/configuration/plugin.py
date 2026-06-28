@@ -9,11 +9,17 @@ from shared.utils import prompt_parser
 from shared.gradio.model_selector_toolbar import unload_models_from_ram
 from shared.utils.video_codecs import SDR_VIDEO_CODEC_CHOICES, VIDEO_CONTAINER_CHOICES, validate_video_output_settings
 from shared.deepy.config import (
+    DEEPY_BACKEND_KEY,
+    DEEPY_BACKEND_LOCAL,
+    DEEPY_BACKEND_REMOTE,
     DEEPY_CONTEXT_TOKENS_MIN,
     DEEPY_CONTEXT_TOKENS_DEFAULT,
     DEEPY_CONTEXT_TOKENS_KEY,
     DEEPY_CUSTOM_SYSTEM_PROMPT_KEY,
     DEEPY_ENABLED_KEY,
+    DEEPY_REMOTE_API_KEY_KEY,
+    DEEPY_REMOTE_BASE_URL_KEY,
+    DEEPY_REMOTE_MODEL_KEY,
     DEEPY_VRAM_MODE_KEY,
     DEEPY_VRAM_MODE_ALWAYS_LOADED,
     DEEPY_VRAM_MODE_UNLOAD,
@@ -21,9 +27,13 @@ from shared.deepy.config import (
     deepy_available,
     format_deepy_context_tokens_label,
     deepy_requirement_message,
+    normalize_deepy_backend,
     normalize_deepy_context_tokens,
     normalize_deepy_custom_system_prompt,
     normalize_deepy_enabled,
+    normalize_deepy_remote_api_key,
+    normalize_deepy_remote_base_url,
+    normalize_deepy_remote_model,
     normalize_deepy_vram_mode,
     set_deepy_runtime_config,
 )
@@ -351,6 +361,33 @@ class ConfigTabPlugin(WAN2GPPlugin):
                         label="Custom System Prompt",
                         info="Added after the built-in Deepy system prompt on the next user interaction.",
                     )
+                    self.deepy_backend_choice = gr.Dropdown(
+                        choices=[
+                            ("Local (bundled Qwen3.5VL runtime)", DEEPY_BACKEND_LOCAL),
+                            ("Remote (OpenAI-compatible endpoint, e.g. LM Studio)", DEEPY_BACKEND_REMOTE),
+                        ],
+                        value=normalize_deepy_backend(self.server_config.get(DEEPY_BACKEND_KEY, DEEPY_BACKEND_LOCAL)),
+                        label="Deepy Backend",
+                        info="Remote bypasses the local LLM entirely (frees its VRAM). Requires Base URL + Model below.",
+                    )
+                    self.deepy_remote_base_url_choice = gr.Textbox(
+                        value=normalize_deepy_remote_base_url(self.server_config.get(DEEPY_REMOTE_BASE_URL_KEY, "")),
+                        label="Remote Base URL",
+                        placeholder="http://192.168.50.254:1234",
+                        info="OpenAI-compatible server base URL. The /v1/chat/completions path is added automatically.",
+                    )
+                    self.deepy_remote_model_choice = gr.Textbox(
+                        value=normalize_deepy_remote_model(self.server_config.get(DEEPY_REMOTE_MODEL_KEY, "")),
+                        label="Remote Model",
+                        placeholder="qwen3.5-35b-a3b",
+                        info="Model id as served by the remote endpoint (a vision + tool capable model is recommended).",
+                    )
+                    self.deepy_remote_api_key_choice = gr.Textbox(
+                        value=normalize_deepy_remote_api_key(self.server_config.get(DEEPY_REMOTE_API_KEY_KEY, "")),
+                        label="Remote API Key (optional)",
+                        type="password",
+                        info="Only needed if the remote server requires authentication. LM Studio ignores it by default.",
+                    )
                     self.deepy_requirement_md = gr.Markdown(value=deepy_requirement_message(self.server_config))
 
                 with gr.Tab("Outputs"):
@@ -461,6 +498,7 @@ class ConfigTabPlugin(WAN2GPPlugin):
             self.matanyone_version_choice,
             self.deepy_enabled_choice, self.deepy_vram_mode_choice,
             self.deepy_context_tokens_choice, self.deepy_custom_system_prompt_choice,
+            self.deepy_backend_choice, self.deepy_remote_base_url_choice, self.deepy_remote_model_choice, self.deepy_remote_api_key_choice,
             self.video_container_choice, self.video_output_codec_choice, self.hdr_video_crf_choice, self.image_output_codec_choice, self.audio_output_codec_choice, self.audio_stand_alone_output_codec_choice,
             self.metadata_choice, self.embed_source_images_choice,
             self.video_save_path_choice, self.image_save_path_choice, self.audio_save_path_choice,
@@ -542,6 +580,7 @@ class ConfigTabPlugin(WAN2GPPlugin):
             matanyone_version_choice,
             deepy_enabled_choice, deepy_vram_mode_choice,
             deepy_context_tokens_choice, deepy_custom_system_prompt_choice,
+            deepy_backend_choice, deepy_remote_base_url_choice, deepy_remote_model_choice, deepy_remote_api_key_choice,
             video_container_choice, video_output_codec_choice, hdr_video_crf_choice, image_output_codec_choice, audio_output_codec_choice, audio_stand_alone_output_codec_choice,
             metadata_choice, embed_source_images_choice,
             save_path_choice, image_save_path_choice, audio_save_path_choice,
@@ -597,6 +636,10 @@ class ConfigTabPlugin(WAN2GPPlugin):
             DEEPY_VRAM_MODE_KEY: normalize_deepy_vram_mode(deepy_vram_mode_choice),
             DEEPY_CONTEXT_TOKENS_KEY: normalize_deepy_context_tokens(deepy_context_tokens_choice),
             DEEPY_CUSTOM_SYSTEM_PROMPT_KEY: normalize_deepy_custom_system_prompt(deepy_custom_system_prompt_choice),
+            DEEPY_BACKEND_KEY: normalize_deepy_backend(deepy_backend_choice),
+            DEEPY_REMOTE_BASE_URL_KEY: normalize_deepy_remote_base_url(deepy_remote_base_url_choice),
+            DEEPY_REMOTE_MODEL_KEY: normalize_deepy_remote_model(deepy_remote_model_choice),
+            DEEPY_REMOTE_API_KEY_KEY: normalize_deepy_remote_api_key(deepy_remote_api_key_choice),
             "preload_in_VRAM": preload_in_VRAM_choice, "depth_anything_v2_variant": depth_anything_v2_variant_choice,
             "notification_sound_enabled": notification_sound_enabled_choice,
             "notification_sound_volume": notification_sound_volume_choice,
@@ -643,6 +686,7 @@ class ConfigTabPlugin(WAN2GPPlugin):
             "notification_sound_enabled", "notification_sound_volume", "audio_processors", "temporal_upsamplers", "spatial_upsamplers", "matanyone_version",
             "prompt_enhancer_temperature", "prompt_enhancer_top_p", "prompt_enhancer_randomize_seed", "prompt_enhancer_quantization", "enhancer_mode",
             DEEPY_ENABLED_KEY, DEEPY_VRAM_MODE_KEY, DEEPY_CONTEXT_TOKENS_KEY, DEEPY_CUSTOM_SYSTEM_PROMPT_KEY,
+            DEEPY_BACKEND_KEY, DEEPY_REMOTE_BASE_URL_KEY, DEEPY_REMOTE_MODEL_KEY, DEEPY_REMOTE_API_KEY_KEY,
             "max_frames_multiplier", "display_stats", "enable_4k_resolutions", "max_reserved_loras", "video_output_codec", "hdr_video_crf", "video_container",
             "embed_source_images", "image_output_codec", "audio_output_codec", "audio_stand_alone_output_codec", "checkpoints_paths", "loras_root", "save_queue_if_crash",
             "model_hierarchy_type", "UI_theme", "queue_color_scheme", gradio_queue_focus_patch.FOCUS_QUEUE_SERVER_CONFIG_KEY

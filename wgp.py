@@ -90,6 +90,7 @@ from shared.utils.self_refiner import normalize_self_refiner_plan, ensure_refine
 from shared.deepy import controller as deepy_controller
 from shared.deepy import cli as deepy_cli
 from shared.deepy import gradio_ui as deepy_gradio_ui
+from shared.deepy import remote_runtime as deepy_remote_runtime
 from shared import extra_settings
 import torch
 import gc
@@ -6059,6 +6060,15 @@ def process_prompt_enhancer(model_type, model_def, prompt_enhancer, original_pro
     prompt_images = [_open_image_input(img) if isinstance(img, str) else img for img in prompt_images]
     if len(original_prompts) == 0 and "T" not in prompt_enhancer_mode:
         return None
+    elif deepy_remote_runtime.remote_backend_active():
+        return deepy_remote_runtime.run_remote_prompt_enhance(
+            original_prompts if "T" in prompt_enhancer_mode else ["an image"],
+            instructions=prompt_enhancer_instructions,
+            images=prompt_images if len(prompt_images) > 0 else None,
+            temperature=server_config.get("prompt_enhancer_temperature", 0.6),
+            top_p=server_config.get("prompt_enhancer_top_p", 0.9),
+            max_tokens=text_encoder_max_tokens,
+        )
     else:
         import secrets
         enhancer_temperature = server_config.get("prompt_enhancer_temperature", 0.6)
@@ -6130,15 +6140,20 @@ def exec_prompt_enhancer_engine(state, model_type, model_def, prompt_enhancer_mo
     if assistant_mode:
         return _deepy.run_assistant_prompt_turn(state, model_def, prompt_enhancer_modes, original_prompts, seed, override_profile=override_profile, send_cmd=send_cmd, tools=tools)
 
-    acquire_GPU_ressources(state, "prompt_enhancer", "Prompt Enhancer")
-    try:
-        ensure_prompt_enhancer_loaded(override_profile=override_profile, progress=progress, send_cmd=send_cmd)
-    except Exception:
-        release_GPU_ressources(state, "prompt_enhancer")
-        raise
+    # Remote backend: route enhancement to the OpenAI-compatible endpoint and skip
+    # loading the local prompt-enhancer model entirely (process_prompt_enhancer's own
+    # remote guard does the work).
+    remote_enhancer = deepy_remote_runtime.remote_backend_active()
+    if not remote_enhancer:
+        acquire_GPU_ressources(state, "prompt_enhancer", "Prompt Enhancer")
+        try:
+            ensure_prompt_enhancer_loaded(override_profile=override_profile, progress=progress, send_cmd=send_cmd)
+        except Exception:
+            release_GPU_ressources(state, "prompt_enhancer")
+            raise
 
     seed = set_seed(seed)
-    num_prompts = len(original_prompts) 
+    num_prompts = len(original_prompts)
 
     enhanced_prompts = []
     for i, (one_prompt, one_image) in enumerate(zip(original_prompts, image_start)):
@@ -6149,17 +6164,18 @@ def exec_prompt_enhancer_engine(state, model_type, model_def, prompt_enhancer_mo
         try:
             enhanced_prompt = process_prompt_enhancer(model_type, model_def, prompt_enhancer_modes, [one_prompt],  start_images, original_image_refs, is_image, audio_only, seed, enhancer_kwargs = enhancer_kwargs)
         except Exception as e:
-            unload_prompt_enhancer_runtime()
-            enhancer_offloadobj.unload_all()
-            release_GPU_ressources(state, "prompt_enhancer")
+            if not remote_enhancer:
+                unload_prompt_enhancer_runtime()
+                enhancer_offloadobj.unload_all()
+                release_GPU_ressources(state, "prompt_enhancer")
             print(traceback.format_exc())
             raise gr.Error(e)
         enhanced_prompts.append(enhanced_prompt)
 
-    unload_prompt_enhancer_runtime()
-    enhancer_offloadobj.unload_all()
-
-    release_GPU_ressources(state, "prompt_enhancer")
+    if not remote_enhancer:
+        unload_prompt_enhancer_runtime()
+        enhancer_offloadobj.unload_all()
+        release_GPU_ressources(state, "prompt_enhancer")
     return enhanced_prompts
 
 def keep_generated_prompt_newlines(multi_prompts_gen_type):
@@ -7038,13 +7054,16 @@ def generate_media(
             enhancer_kwargs = {"image_prompt_type":  image_prompt_type, "video_prompt_type":  video_prompt_type, "audio_prompt_type":  audio_prompt_type}
             multi_prompt_output = prompt_enhancer_outputs_multiple_prompts(prompt_enhancer)
             prompts_to_enhance = original_prompts[:1] if multi_prompt_output else original_prompts
+            remote_enhancer = deepy_remote_runtime.remote_backend_active()
             try:
-                ensure_prompt_enhancer_loaded(override_profile=override_profile, send_cmd=send_cmd)
+                if not remote_enhancer:
+                    ensure_prompt_enhancer_loaded(override_profile=override_profile, send_cmd=send_cmd)
                 enhanced_prompts = process_prompt_enhancer(model_type, model_def, prompt_enhancer, prompts_to_enhance,  image_start if image_start is not None else image_end , original_image_refs, is_image, audio_only, seed, enhancer_kwargs = enhancer_kwargs )
             finally:
-                unload_prompt_enhancer_runtime()
-                if enhancer_offloadobj is not None:
-                    enhancer_offloadobj.unload_all()
+                if not remote_enhancer:
+                    unload_prompt_enhancer_runtime()
+                    if enhancer_offloadobj is not None:
+                        enhancer_offloadobj.unload_all()
             if enhanced_prompts is not None:
                 print(f"Enhanced prompts: {enhanced_prompts}" )
                 if multi_prompt_output:

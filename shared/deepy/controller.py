@@ -10,10 +10,13 @@ from typing import Any, Callable
 import gradio as gr
 
 from shared.deepy.config import (
+    DEEPY_BACKEND_REMOTE,
     DEEPY_ENABLED_KEY,
     DEEPY_VRAM_MODE_KEY,
     DEEPY_VRAM_MODE_UNLOAD,
     deepy_available,
+    deepy_backend,
+    deepy_remote_enabled,
     deepy_requirement_met,
     normalize_deepy_enabled,
     normalize_deepy_vram_mode,
@@ -42,6 +45,7 @@ from shared.utils.thread_utils import AsyncStream, async_run_in
 
 _DEEPY_GPU_PROCESS_ID = "deepy"
 _DEEPY_REQUIREMENT_TEXT = "Deepy requires Prompt Enhancer to be set to Qwen3.5VL Abliterated 4B or 9B."
+_DEEPY_REMOTE_REQUIREMENT_TEXT = "Deepy remote backend needs a Base URL and Model name (Configuration > Deepy)."
 _DEEPY_DISABLED_TEXT = "Deepy is disabled in Configuration > Deepy."
 
 
@@ -156,10 +160,14 @@ class DeepyController:
 
     def requirement_error_text(self) -> str:
         server_config = self._server_config()
-        if not deepy_requirement_met(server_config):
-            return _DEEPY_REQUIREMENT_TEXT
         if not normalize_deepy_enabled(server_config.get(DEEPY_ENABLED_KEY, 0)):
             return _DEEPY_DISABLED_TEXT
+        if deepy_backend(server_config) == DEEPY_BACKEND_REMOTE:
+            if not deepy_remote_enabled(server_config):
+                return _DEEPY_REMOTE_REQUIREMENT_TEXT
+            return ""
+        if not deepy_requirement_met(server_config):
+            return _DEEPY_REQUIREMENT_TEXT
         return ""
 
     def get_vram_mode(self) -> str:
@@ -393,7 +401,7 @@ class DeepyController:
         server_config = self._server_config()
         if not normalize_deepy_enabled(server_config.get(DEEPY_ENABLED_KEY, 0)):
             raise gr.Error(_DEEPY_DISABLED_TEXT)
-        if not deepy_requirement_met(server_config):
+        if not deepy_requirement_met(server_config) and not deepy_remote_enabled(server_config):
             raise gr.Error(_DEEPY_REQUIREMENT_TEXT)
         if send_cmd is None or tools is None:
             raise gr.Error("Assistant mode requires a command stream and a tool registry.")
