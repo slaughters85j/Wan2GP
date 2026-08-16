@@ -17,6 +17,14 @@ DEEPY_CONTEXT_TOKENS_KEY = "deepy_context_tokens"
 DEEPY_CUSTOM_SYSTEM_PROMPT_KEY = "deepy_custom_system_prompt"
 DEEPY_AUTO_CANCEL_QUEUE_TASKS_KEY = "deepy_auto_cancel_queue_tasks"
 DEEPY_SEPARATE_REQUESTS_WITH_EMPTY_LINE_KEY = "deepy_separate_requests_with_empty_line"
+DEEPY_BACKEND_KEY = "deepy_backend"
+DEEPY_REMOTE_BASE_URL_KEY = "deepy_remote_base_url"
+DEEPY_REMOTE_MODEL_KEY = "deepy_remote_model"
+DEEPY_REMOTE_API_KEY_KEY = "deepy_remote_api_key"
+
+DEEPY_BACKEND_LOCAL = "local"
+DEEPY_BACKEND_REMOTE = "remote"
+DEEPY_BACKEND_DEFAULT = DEEPY_BACKEND_LOCAL
 
 DEEPY_VRAM_MODE_UNLOAD = "unload"
 DEEPY_VRAM_MODE_ALWAYS_LOADED = "always_loaded"
@@ -102,6 +110,36 @@ def normalize_deepy_custom_system_prompt(value: Any) -> str:
     return text
 
 
+def normalize_deepy_backend(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return DEEPY_BACKEND_REMOTE if text == DEEPY_BACKEND_REMOTE else DEEPY_BACKEND_LOCAL
+
+
+def normalize_deepy_remote_base_url(value: Any) -> str:
+    return str(value or "").strip().rstrip("/")
+
+
+def normalize_deepy_remote_model(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def normalize_deepy_remote_api_key(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def deepy_backend(server_config: dict[str, Any] | None) -> str:
+    return normalize_deepy_backend((server_config or {}).get(DEEPY_BACKEND_KEY, DEEPY_BACKEND_DEFAULT))
+
+
+def deepy_remote_enabled(server_config: dict[str, Any] | None) -> bool:
+    runtime_config = server_config or {}
+    if deepy_backend(runtime_config) != DEEPY_BACKEND_REMOTE:
+        return False
+    base_url = normalize_deepy_remote_base_url(runtime_config.get(DEEPY_REMOTE_BASE_URL_KEY, ""))
+    model = normalize_deepy_remote_model(runtime_config.get(DEEPY_REMOTE_MODEL_KEY, ""))
+    return len(base_url) > 0 and len(model) > 0
+
+
 def normalize_deepy_auto_cancel_queue_tasks(value: Any) -> bool:
     if isinstance(value, str):
         text = value.strip().lower()
@@ -166,6 +204,10 @@ def normalize_deepy_runtime_config(server_config: dict[str, Any] | None) -> dict
     runtime_config[DEEPY_CUSTOM_SYSTEM_PROMPT_KEY] = normalize_deepy_custom_system_prompt(runtime_config.get(DEEPY_CUSTOM_SYSTEM_PROMPT_KEY, ""))
     runtime_config[DEEPY_AUTO_CANCEL_QUEUE_TASKS_KEY] = normalize_deepy_auto_cancel_queue_tasks(runtime_config.get(DEEPY_AUTO_CANCEL_QUEUE_TASKS_KEY, DEEPY_AUTO_CANCEL_QUEUE_TASKS_DEFAULT))
     runtime_config[DEEPY_SEPARATE_REQUESTS_WITH_EMPTY_LINE_KEY] = normalize_deepy_separate_requests_with_empty_line(runtime_config.get(DEEPY_SEPARATE_REQUESTS_WITH_EMPTY_LINE_KEY, DEEPY_SEPARATE_REQUESTS_WITH_EMPTY_LINE_DEFAULT))
+    runtime_config[DEEPY_BACKEND_KEY] = normalize_deepy_backend(runtime_config.get(DEEPY_BACKEND_KEY, DEEPY_BACKEND_DEFAULT))
+    runtime_config[DEEPY_REMOTE_BASE_URL_KEY] = normalize_deepy_remote_base_url(runtime_config.get(DEEPY_REMOTE_BASE_URL_KEY, ""))
+    runtime_config[DEEPY_REMOTE_MODEL_KEY] = normalize_deepy_remote_model(runtime_config.get(DEEPY_REMOTE_MODEL_KEY, ""))
+    runtime_config[DEEPY_REMOTE_API_KEY_KEY] = normalize_deepy_remote_api_key(runtime_config.get(DEEPY_REMOTE_API_KEY_KEY, ""))
     return runtime_config
 
 
@@ -183,6 +225,10 @@ def get_deepy_default_runtime_config() -> dict[str, Any]:
         DEEPY_CUSTOM_SYSTEM_PROMPT_KEY: "",
         DEEPY_AUTO_CANCEL_QUEUE_TASKS_KEY: DEEPY_AUTO_CANCEL_QUEUE_TASKS_DEFAULT,
         DEEPY_SEPARATE_REQUESTS_WITH_EMPTY_LINE_KEY: DEEPY_SEPARATE_REQUESTS_WITH_EMPTY_LINE_DEFAULT,
+        DEEPY_BACKEND_KEY: DEEPY_BACKEND_DEFAULT,
+        DEEPY_REMOTE_BASE_URL_KEY: "",
+        DEEPY_REMOTE_MODEL_KEY: "",
+        DEEPY_REMOTE_API_KEY_KEY: "",
     }
 
 
@@ -237,7 +283,7 @@ def deepy_enabled(server_config: dict[str, Any] | None) -> bool:
 
 
 def deepy_available(server_config: dict[str, Any] | None) -> bool:
-    return deepy_enabled(server_config) and deepy_requirement_met(server_config)
+    return deepy_enabled(server_config) and (deepy_requirement_met(server_config) or deepy_remote_enabled(server_config))
 
 
 def deepy_requirement_message(server_config: dict[str, Any] | None) -> str:

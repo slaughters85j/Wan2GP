@@ -35,7 +35,7 @@ from shared.deepy.config import (
 from shared.deepy import DEFAULT_SYSTEM_PROMPT as ASSISTANT_SYSTEM_PROMPT
 from shared.deepy.debug_bootstrap import capture_external_logs
 from shared import extra_settings
-from shared.deepy import media_registry, tool_settings as deepy_tool_settings, transcription as deepy_transcription, ui_settings as deepy_ui_settings, video_tools as deepy_video_tools, vision as deepy_vision
+from shared.deepy import media_registry, remote_runtime, tool_settings as deepy_tool_settings, transcription as deepy_transcription, ui_settings as deepy_ui_settings, video_tools as deepy_video_tools, vision as deepy_vision
 from shared.gradio import assistant_chat
 from shared.prompt_enhancer import qwen35_text
 from shared.prompt_enhancer.qwen35_assistant_runtime import (
@@ -5090,6 +5090,8 @@ class AssistantEngine:
         return caption_model, caption_processor
 
     def _run_visual_query(self, media_record: dict[str, Any], question: str, frame_no: int | None = None) -> dict[str, Any]:
+        if remote_runtime.remote_backend_active():
+            return remote_runtime.run_remote_vision_query(self, media_record, question, frame_no)
         if not self._gpu_acquired:
             self.runtime_hooks.clear_gpu_resident()
             self.session.release_vram_callback = None
@@ -6036,6 +6038,9 @@ class AssistantEngine:
         self.session.messages.append(message)
 
     def run_turn(self, user_text: str, max_new_tokens: int = 1024, seed: int | None = 0, do_sample: bool = True, temperature: float | None = 0.6, top_p: float | None = 0.9, top_k: int | None = None) -> None:
+        if remote_runtime.remote_backend_active():
+            remote_runtime.run_remote_turn(self, user_text, max_new_tokens=max_new_tokens, temperature=temperature, top_p=top_p)
+            return
         user_text = str(user_text or "").strip()
         if len(user_text) == 0:
             self._send_chat("Please enter a request.")
