@@ -11,12 +11,12 @@ from shared.attention import pay_attention
 
 
 def rope(pos: Tensor, dim: int, theta: float = 1e4, ntk: float = 1.0) -> Tensor:
-    scale = torch.arange(0, dim, 2, dtype=torch.float32, device=pos.device) / dim
+    scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
     omega = 1.0 / ((theta * ntk) ** scale)
-    out = torch.einsum("...n,d->...nd", pos.float(), omega)
+    out = torch.einsum("...n,d->...nd", pos, omega)
     out = torch.stack([torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1)
     out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
-    return out
+    return out.float()
 
 
 def _apply_rope_inplace(x: Tensor, freqs: Tensor) -> Tensor:
@@ -35,14 +35,7 @@ def ropeapply(xq: Tensor, xk: Tensor, freqs: Tensor) -> tuple[Tensor, Tensor]:
     return _apply_rope_inplace(xq, freqs), _apply_rope_inplace(xk, freqs)
 
 
-def attention(qkv_list: list[Tensor], mask: Tensor | None = None, scale: float | None = None, gqa: bool = False) -> Tensor:
-    q, k, v = qkv_list
-    qkv_list.clear()
-    q = rearrange(q, "B H L D -> B L H D")
-    k = rearrange(k, "B H L D -> B L H D")
-    v = rearrange(v, "B H L D -> B L H D")
-    if mask is not None:
-        mask = mask.transpose(1, 2)
+def _attention_from_blh(q: Tensor, k: Tensor, v: Tensor, mask: Tensor | None = None, scale: float | None = None, gqa: bool = False) -> Tensor:
     if gqa:
         batch = q.shape[0]
         groups = k.shape[2]
@@ -53,7 +46,7 @@ def attention(qkv_list: list[Tensor], mask: Tensor | None = None, scale: float |
         k = rearrange(k, "B G R L D -> (B G R) L 1 D")
         v = rearrange(v, "B G R L D -> (B G R) L 1 D")
         if mask is not None:
-            mask = mask.expand(groups * repeat, -1, -1, -1) if batch == 1 else mask.repeat_interleave(groups * repeat, dim=0)
+            mask = mask.repeat_interleave(groups * repeat, dim=0).contiguous() if batch > 1 else mask.expand(groups * repeat, -1, -1, -1)
         qkv_list = [q, k, v]
         q = k = v = None
         out = pay_attention(qkv_list, attention_mask=mask, softmax_scale=scale, recycle_q=True)
@@ -63,8 +56,78 @@ def attention(qkv_list: list[Tensor], mask: Tensor | None = None, scale: float |
     return rearrange(pay_attention(qkv_list, attention_mask=mask, softmax_scale=scale, recycle_q=True), "B L H D -> B L (H D)")
 
 
+def attention(
+    qkv_list: list[Tensor],
+    mask: Tensor | None = None,
+    scale: float | None = None,
+    gqa: bool = False,
+    txt_len: int | None = None,
+    NAG: dict | None = None,
+    neg_k: Tensor | None = None,
+    neg_v: Tensor | None = None,
+    neg_mask: Tensor | None = None,
+) -> Tensor:
+    q, k, v = qkv_list
+    qkv_list.clear()
+    q = rearrange(q, "B H L D -> B L H D")
+    k = rearrange(k, "B H L D -> B L H D")
+    v = rearrange(v, "B H L D -> B L H D")
+    if mask is not None:
+        mask = mask.transpose(1, 2)
+    if NAG is not None:
+        if txt_len is None or neg_k is None or neg_v is None or neg_mask is None:
+            raise ValueError("Krea 2 NAG requires positive stream tokens plus negative text K/V side inputs.")
+        cap_len = int(NAG.get("cap_embed_len", 0) or 0)
+        if cap_len <= 0 or cap_len != txt_len or neg_k.shape[2] != cap_len:
+            raise ValueError("Krea 2 NAG expected matching positive and negative text lengths.")
+        neg_k = rearrange(neg_k, "B H L D -> B L H D")
+        neg_v = rearrange(neg_v, "B H L D -> B L H D")
+        neg_mask = neg_mask[:, None, None, :]
+        img_start = txt_len
+        query_start = int(NAG["query_start"])
+        query_end = int(NAG["query_end"])
+        if not img_start <= query_start < query_end <= q.shape[1]:
+            raise ValueError(f"Krea 2 NAG target query range [{query_start}, {query_end}) is invalid for sequence length {q.shape[1]}.")
+        guidance_q = q[:, query_start:query_end].clone()
+        x_pos = _attention_from_blh(q, k, v, mask=mask, scale=scale, gqa=gqa)
+        neg_full_mask = None if mask is None else torch.cat((neg_mask, mask[..., img_start:]), dim=-1)
+        k_neg = torch.cat((neg_k, k[:, img_start:]), dim=1)
+        v_neg = torch.cat((neg_v, v[:, img_start:]), dim=1)
+        x_guidance = _attention_from_blh(guidance_q, k_neg, v_neg, mask=neg_full_mask, scale=scale, gqa=gqa)
+        q = k = v = neg_k = neg_v = k_neg = v_neg = neg_mask = neg_full_mask = None
+
+        x_pos_img = x_pos[:, query_start:query_end]
+        nag_scale = float(NAG["scale"])
+        nag_alpha = float(NAG["alpha"])
+        nag_tau = float(NAG["tau"])
+        dtype = x_pos_img.dtype
+        x_guidance.mul_(1 - nag_scale)
+        x_guidance.add_(x_pos_img, alpha=nag_scale)
+        norm_positive = torch.norm(x_pos_img, p=1, dim=-1, keepdim=True)
+        norm_guidance = torch.norm(x_guidance, p=1, dim=-1, keepdim=True)
+        norm_scale = norm_guidance / norm_positive
+        torch.nan_to_num(norm_scale, nan=10.0, posinf=10.0, neginf=10.0, out=norm_scale)
+        factor = (norm_positive * nag_tau) / (norm_guidance + 1e-7)
+        x_guidance = torch.where(norm_scale > nag_tau, x_guidance * factor, x_guidance).to(dtype)
+        del norm_positive, norm_guidance, norm_scale, factor
+
+        x_guidance.mul_(nag_alpha)
+        x_guidance.add_(x_pos_img, alpha=1 - nag_alpha)
+        x_pos_img.copy_(x_guidance)
+        x_guidance = x_pos_img = None
+        return x_pos
+    out = _attention_from_blh(q, k, v, mask=mask, scale=scale, gqa=gqa)
+    q = k = v = None
+    return out
+
+
 def key_padding_mask(mask: Tensor) -> Tensor:
     return mask.unsqueeze(1).unsqueeze(2)
+
+
+def modulate_inplace(x_list: list[Tensor], scale: Tensor, shift: Tensor):
+    x = x_list[0]
+    x.mul_(scale.add_(1)).add_(shift)
 
 
 def temb(t: Tensor, dim: int, period: float = 1e4, tfactor: float = 1e3, device: torch.device = None, dtype: torch.dtype = None) -> Tensor:
@@ -153,16 +216,15 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.scale = nn.Parameter(torch.zeros(features, device=device, dtype=torch.float32))
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x_list: Tensor) -> Tensor:
+        if isinstance(x_list,list):
+            x = x_list[0]
+            x_list.clear()
+        else:
+            x = x_list
+            del x_list
         dtype = x.dtype
-        return self.forward_list([x], dtype)
-
-    def forward_list(self, x_list: list[Tensor], dtype: torch.dtype | None = None) -> Tensor:
-        x = x_list[0]
-        x_list.clear()
-        dtype = x.dtype if dtype is None else dtype
-        x = x.float()
-        out = F.rms_norm(x, (self.features,), eps=self.eps, weight=(self.scale.float() + 1.0))
+        out = F.rms_norm(x, (self.features,), eps=self.eps, weight=(self.scale + 1.0))
         del x
         return out.to(dtype)
 
@@ -178,7 +240,7 @@ class QKNorm(nn.Module):
         k_list = [qkv_list[1]]
         v = qkv_list[2]
         qkv_list.clear()
-        return self.qnorm.forward_list(q_list), self.knorm.forward_list(k_list), v
+        return self.qnorm.forward(q_list), self.knorm.forward(k_list), v
 
 
 class SwiGLU(nn.Module):
@@ -192,12 +254,17 @@ class SwiGLU(nn.Module):
         self.features = features
         self.mlpdim = mlpdim
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor | list[Tensor]) -> Tensor:
+        if isinstance(x, list):
+            x_ = x[0]
+            x.clear()
+            x = x_
         seq_len = x.shape[-2]
         chunk_size = 0 if seq_len <= 1024 else max(128, min(seq_len, seq_len * self.features // max(2 * self.mlpdim, 1)))
         if chunk_size == 0:
             gate = F.silu(self.gate(x))
             up = self.up(x)
+            del x
             gate.mul_(up)
             del up
             return self.down(gate)
@@ -211,6 +278,7 @@ class SwiGLU(nn.Module):
             chunk_out = self.down(gate)
             out.narrow(-2, start, chunk_out.shape[-2]).copy_(chunk_out)
             del chunk, gate, chunk_out
+        del x
         return out
 
 
@@ -228,7 +296,31 @@ class Attention(nn.Module):
         self.gqa = self.heads != self.kvheads
         self.wo = nn.Linear(dim, dim, bias=bias)
 
-    def forward(self, qkv: Tensor, freqs: Tensor | None = None, mask: Tensor | None = None) -> Tensor:
+    def forward(
+        self,
+        qkv: Tensor | list[Tensor],
+        freqs: Tensor | None = None,
+        mask: Tensor | None = None,
+        txt_len: int | None = None,
+        NAG: dict | None = None,
+        neg_context: Tensor | None = None,
+        neg_mask: Tensor | None = None,
+    ) -> Tensor:
+        if isinstance(qkv, list):
+            qkv_ = qkv[0]
+            qkv.clear()
+            qkv = qkv_
+        neg_k = neg_v = None
+        if NAG is not None:
+            if neg_context is None or neg_mask is None:
+                raise ValueError("Krea 2 NAG requires negative text context and mask.")
+            neg_k, neg_v = self.wk(neg_context), self.wv(neg_context)
+            neg_k = rearrange(neg_k, "B L (H D) -> B H L D", H=self.kvheads)
+            neg_v = rearrange(neg_v, "B L (H D) -> B H L D", H=self.kvheads)
+            neg_k = self.qknorm.knorm.forward([neg_k])
+            if freqs is not None:
+                neg_k = _apply_rope_inplace(neg_k, freqs[:, : neg_context.shape[1]])
+            neg_context = None
         q, k, v = self.wq(qkv), self.wk(qkv), self.wv(qkv)
         q = rearrange(q, "B L (H D) -> B H L D", H=self.heads)
         k = rearrange(k, "B L (H D) -> B H L D", H=self.kvheads)
@@ -240,8 +332,10 @@ class Attention(nn.Module):
             q, k = ropeapply(q, k, freqs)
         qkv_list = [q, k, v]
         q = k = v = None
-        out = attention(qkv_list, mask=mask, gqa=self.gqa)
+        out = attention(qkv_list, mask=mask, gqa=self.gqa, txt_len=txt_len, NAG=NAG, neg_k=neg_k, neg_v=neg_v, neg_mask=neg_mask)
+        neg_k = neg_v = neg_mask = None
         gate = F.sigmoid(self.gate(qkv))
+        del qkv
         out.mul_(gate)
         del gate
         return self.wo(out)
@@ -254,10 +348,12 @@ class LastLayer(nn.Module):
         self.linear = nn.Linear(features, patch * patch * channels, bias=True)
         self.modulation = SimpleModulation(features)
 
-    def forward(self, x: Tensor, tvec: Tensor) -> Tensor:
+    def forward(self, x: Tensor | list[Tensor], tvec: Tensor) -> Tensor:
         scale, shift = self.modulation(tvec)
-        x = (1 + scale) * self.norm(x) + shift
-        return self.linear(x)
+        x_list = x if isinstance(x, list) else [x]
+        x_list = [self.norm.forward(x_list)]
+        modulate_inplace(x_list, scale, shift)
+        return self.linear(x_list.pop())
 
 
 class TextFusionBlock(nn.Module):
@@ -269,8 +365,14 @@ class TextFusionBlock(nn.Module):
         self.mlp = SwiGLU(features, multiplier, bias)
 
     def forward(self, x: Tensor, mask: Tensor | None = None) -> Tensor:
-        x = x + self.attn(self.prenorm(x), mask=mask)
-        x = x + self.mlp(self.postnorm(x))
+        x_list = [self.prenorm(x)]
+        attn_out = self.attn(x_list, mask=mask)
+        x.add_(attn_out)
+        del attn_out
+        x_list = [self.postnorm(x)]
+        mlp_out = self.mlp(x_list)
+        x.add_(mlp_out)
+        del mlp_out
         return x
 
 
@@ -306,14 +408,99 @@ class SingleStreamBlock(nn.Module):
         self.attn = Attention(dim=features, heads=heads, bias=bias, kvheads=kvheads)
         self.mlp = SwiGLU(features, multiplier, bias)
 
-    def forward(self, x: Tensor, vec: Tensor, freqs: Tensor, mask: Tensor | None = None) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        vec: Tensor,
+        freqs: Tensor,
+        mask: Tensor | None = None,
+        txt_len: int | None = None,
+        NAG: dict | None = None,
+        neg_context: Tensor | None = None,
+        neg_mask: Tensor | None = None,
+    ) -> Tensor:
         prescale, preshift, pregate, postscale, postshift, postgate = self.mod(vec)
-        x = x + pregate * self.attn((1 + prescale) * self.prenorm(x) + preshift, freqs, mask)
-        x = x + postgate * self.mlp((1 + postscale) * self.postnorm(x) + postshift)
+        x_list = [self.prenorm(x)]
+        modulate_inplace(x_list, prescale, preshift)
+        if NAG is not None:
+            neg_context = self.prenorm(neg_context)
+            neg_context.mul_(prescale).add_(preshift)
+        attn_out = self.attn(x_list, freqs, mask, txt_len=txt_len, NAG=NAG, neg_context=neg_context, neg_mask=neg_mask)
+        neg_context = neg_mask = None
+        attn_out.mul_(pregate)
+        x.add_(attn_out)
+        del attn_out
+        x_list = [self.postnorm(x)]
+        modulate_inplace(x_list, postscale, postshift)
+        mlp_out = self.mlp(x_list)
+        mlp_out.mul_(postgate)
+        x.add_(mlp_out)
+        del mlp_out
         return x
 
 
 class SingleStreamDiT(nn.Module):
+    def preprocess_loras(self, model_type, sd):
+        """Map common Diffusers/Kohya Krea2 LoRA names to this model."""
+        replacements = (
+            ("final_layer", "last"),
+            ("img_in", "first"),
+            ("time_embed.linear_1", "tmlp.0"),
+            ("time_embed.linear_2", "tmlp.2"),
+            ("time_mod_proj", "tproj.1"),
+            ("txt_in.linear_1", "txtmlp.1"),
+            ("txt_in.linear_2", "txtmlp.3"),
+            ("transformer_blocks", "blocks"),
+            ("text_fusion", "txtfusion"),
+            ("feed_forward.", "mlp."),
+            ("ffn.", "mlp."),
+            ("ff.", "mlp."),
+            ("to_out.0", "wo"),
+            ("to_out", "wo"),
+            ("to_gate", "gate"),
+            ("to_q", "wq"),
+            ("to_k", "wk"),
+            ("to_v", "wv"),
+        )
+
+        def map_key(key):
+            prefix = next((p for p in ("lora_unet_", "lora_te_") if key.startswith(p)), None)
+            if prefix:
+                path, dot, suffix = key[len(prefix):].partition(".")
+                if not dot:
+                    return key
+                for source, target in (
+                    ("final_layer", "last"),
+                    ("img_in", "first"),
+                    ("time_embed_linear_1", "tmlp_0"),
+                    ("time_embed_linear_2", "tmlp_2"),
+                    ("time_mod_proj", "tproj_1"),
+                    ("txt_in_linear_1", "txtmlp_1"),
+                    ("txt_in_linear_2", "txtmlp_3"),
+                    ("transformer_blocks", "blocks"),
+                    ("text_fusion", "txtfusion"),
+                    ("_feed_forward_", "_mlp_"),
+                    ("_ffn_", "_mlp_"),
+                    ("_ff_", "_mlp_"),
+                    ("to_out_0", "wo"),
+                    ("to_out", "wo"),
+                    ("to_gate", "gate"),
+                    ("to_q", "wq"),
+                    ("to_k", "wk"),
+                    ("to_v", "wv"),
+                ):
+                    path = path.replace(source, target)
+                for name in ("layerwise_blocks", "refiner_blocks", "language_model"):
+                    path = path.replace(name, name.replace("_", "-"))
+                path = path.replace("_", ".").replace("-", "_")
+                return f"{path}.{suffix}"
+
+            for source, target in replacements:
+                key = key.replace(source, target)
+            return key
+
+        return {map_key(key): value for key, value in sd.items()}
+
     def __init__(self, config: SingleMMDiTConfig):
         super().__init__()
         self.config = config
@@ -328,13 +515,28 @@ class SingleStreamDiT(nn.Module):
         self.last = LastLayer(config.features, config.patch, config.channels)
         self.tproj = nn.Sequential(nn.GELU(approximate="tanh"), nn.Linear(config.features, config.features * 6))
 
-    def _embed_context(self, context: Tensor, mask: Tensor) -> Tensor | None:
+    def prepare_context(self, context: Tensor | list[Tensor], mask: Tensor, output_len: int | None = None) -> Tensor | None:
         self.txtfusion._interrupt = getattr(self, "_interrupt", False)
-        txtmask = key_padding_mask(mask[:, : context.shape[1]])
+        if isinstance(context, list):
+            context_ = context[0]
+            context.clear()
+            context = context_
+        else:
+            context = context.clone()
+        valid_mask = mask[:, : context.shape[1]]
+        txtmask = key_padding_mask(valid_mask)
         context = self.txtfusion(context, mask=txtmask)
         if context is None:
             return None
-        return self.txtmlp(context)
+        context = self.txtmlp(context)
+        context.masked_fill_(~valid_mask.unsqueeze(-1), 0)
+        if output_len is not None and context.shape[1] < output_len:
+            context = F.pad(context, (0, 0, 0, output_len - context.shape[1]))
+        return context
+
+    def prepare_timestep(self, t: Tensor) -> tuple[Tensor, Tensor]:
+        t = self.tmlp(temb(t, self.config.tdim, device=t.device, dtype=t.dtype))
+        return t, self.tproj(t)
 
     def _build_stream(self, img: Tensor, context: Tensor, pos: Tensor, mask: Tensor, freqs: Tensor | None = None):
         txtlen, imglen = context.shape[1], img.shape[1]
@@ -350,36 +552,36 @@ class SingleStreamDiT(nn.Module):
             pos = F.pad(pos, (0, 0, 0, padlen))
         mask = key_padding_mask(mask)
         if freqs is None:
-            freqs = self.posemb(pos).to(combined.dtype)
+            freqs = self.posemb(pos)
+            freqs = freqs.to(combined.dtype)
         return combined, txtlen, imglen, freqs, mask
 
-    def forward(self, img: Tensor, context: Tensor, t: Tensor, pos: Tensor, mask: Tensor | None = None) -> Tensor:
+    def forward(
+        self,
+        img: Tensor,
+        context: Tensor,
+        t: Tensor,
+        tvec: Tensor,
+        pos: Tensor,
+        mask: Tensor | None = None,
+        NAG: dict | None = None,
+        neg_context: Tensor | None = None,
+        neg_mask: Tensor | None = None,
+        target_len: int | None = None,
+    ) -> Tensor:
         img = self.first(img)
-        t = self.tmlp(temb(t, self.config.tdim, device=img.device, dtype=img.dtype))
-        tvec = self.tproj(t)
-        context = self._embed_context(context, mask)
-        if context is None:
-            return None
         combined, txtlen, imglen, freqs, mask = self._build_stream(img, context, pos, mask)
         del img, context, pos
         for block in self.blocks:
-            combined = block(combined, tvec, freqs, mask)
+            combined = block(combined, tvec, freqs, mask, txt_len=txtlen, NAG=NAG, neg_context=neg_context, neg_mask=neg_mask)
             if getattr(self, "_interrupt", False):
                 return None
             self.txtfusion._interrupt = getattr(self, "_interrupt", False)
-        image_tokens = combined[:, txtlen : txtlen + imglen]
-        return self.last(image_tokens, t)
+        target_len = imglen if target_len is None else target_len
+        return self.last([combined[:, txtlen + imglen - target_len : txtlen + imglen]], t)
 
-    def forward_cfg(self, img: Tensor, context: Tensor, uncond_context: Tensor, t: Tensor, pos: Tensor, uncond_pos: Tensor, mask: Tensor, uncond_mask: Tensor) -> tuple[Tensor | None, Tensor | None]:
+    def forward_cfg(self, img: Tensor, context: Tensor, uncond_context: Tensor, t: Tensor, tvec: Tensor, pos: Tensor, uncond_pos: Tensor, mask: Tensor, uncond_mask: Tensor, target_len: int | None = None) -> tuple[Tensor | None, Tensor | None]:
         img = self.first(img)
-        t = self.tmlp(temb(t, self.config.tdim, device=img.device, dtype=img.dtype))
-        tvec = self.tproj(t)
-        context = self._embed_context(context, mask)
-        if context is None:
-            return None, None
-        uncond_context = self._embed_context(uncond_context, uncond_mask)
-        if uncond_context is None:
-            return None, None
         share_freqs = pos.shape == uncond_pos.shape
         combined, txtlen, imglen, freqs, mask = self._build_stream(img, context, pos, mask)
         uncond_combined, uncond_txtlen, uncond_imglen, uncond_freqs, uncond_mask = self._build_stream(img, uncond_context, uncond_pos, uncond_mask, freqs=freqs if share_freqs else None)
@@ -391,4 +593,5 @@ class SingleStreamDiT(nn.Module):
             uncond_combined = block(uncond_combined, tvec, uncond_freqs, uncond_mask)
             if getattr(self, "_interrupt", False):
                 return None, None
-        return self.last(combined[:, txtlen : txtlen + imglen], t), self.last(uncond_combined[:, uncond_txtlen : uncond_txtlen + uncond_imglen], t)
+        target_len = imglen if target_len is None else target_len
+        return self.last([combined[:, txtlen + imglen - target_len : txtlen + imglen]], t), self.last([uncond_combined[:, uncond_txtlen + uncond_imglen - target_len : uncond_txtlen + uncond_imglen]], t)

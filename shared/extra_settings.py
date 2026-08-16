@@ -221,13 +221,19 @@ def _model_label(key: str, fallback: str) -> _Resolver:
 
 
 def _model_setting_config(model_def: dict[str, Any] | None, key: str) -> dict[str, Any]:
-    return model_def.get(key, {})
+    return (model_def or {}).get(key, {})
 
 
 def _model_setting_label(key: str, fallback: str) -> _Resolver:
     def resolver(model_def: dict[str, Any] | None, _context: dict[str, Any]) -> str:
         text = _model_setting_config(model_def, key).get("label", "").strip()
         return text or fallback
+    return resolver
+
+
+def _model_setting_bound(key: str, bound: str, fallback: int | float | None) -> _Resolver:
+    def resolver(model_def: dict[str, Any] | None, _context: dict[str, Any]) -> int | float | None:
+        return _normalize_number(_model_setting_config(model_def, key).get(bound, fallback))
     return resolver
 
 
@@ -254,7 +260,7 @@ def _audio_scale_label(model_def: dict[str, Any] | None, _context: dict[str, Any
 
 
 def _guide_setting_visible(model_def: dict[str, Any]) -> bool:
-    return model_def.get("guide_custom_choices", None) is not None or model_def.get("guide_preprocessing", None) is not None
+    return model_def.get("guide_custom_choices", None) is not None or model_def.get("guide_custom_choices_image", None) is not None or model_def.get("guide_preprocessing", None) is not None
 
 
 def _guidance_row_visible(model_def: dict[str, Any]) -> bool:
@@ -511,7 +517,7 @@ _add_setting("control_net_weight_alt", _control_net_alt_label, "number", min=0.0
 _add_setting("motion_amplitude", "Motion Amplitude", "number", min=1.0, max=1.4, step=0.01, visible=_show_if_flag("motion_amplitude"), containers=("motion_amplitude_col",))
 _add_setting("mask_expand", "Expand / Shrink Mask Area", "integer", min=-10, max=50, step=1, visible=_show_if(_guide_setting_visible))
 _add_setting("input_video_strength", _model_setting_label("input_video_strength", "Input Video Strength"), "number", min=0.0, max=1.0, step=0.01, visible=_show_if_model_setting_label("input_video_strength"))
-_add_setting("image_refs_relative_size", "Rescale Internaly Image Ref (% in relation to Output Video) to change Output Composition", "integer", min=20, max=100, step=1, visible=_show_if_flag("any_image_refs_relative_size"))
+_add_setting("image_refs_relative_size", _model_setting_label("image_refs_relative_size", "Rescale Internaly Image Ref (% in relation to Output Video) to change Output Composition"), "integer", min=_model_setting_bound("image_refs_relative_size", "min", 20), max=_model_setting_bound("image_refs_relative_size", "max", 100), step=_model_setting_bound("image_refs_relative_size", "step", 1), visible=_show_if_flag("any_image_refs_relative_size"))
 _add_setting("sliding_window_size", "Sliding Window Size", "integer", min=_sliding_window_size_min, max=_sliding_window_size_max, step=_sliding_window_size_step, visible=_show_if(_sliding_window_visible))
 _add_setting("sliding_window_overlap", "Windows Frames Overlap (needed to maintain continuity between windows, a higher value will require more windows)", "integer", min=_sliding_window_overlap_bound("overlap_min", 1), max=_sliding_window_overlap_bound("overlap_max", 97), step=_sliding_window_overlap_bound("overlap_step", 4), visible=_show_if(_sliding_window_visible))
 _add_setting("sub_parallel_window_size", "Sub Parallel Window Size (0 = disabled)", "integer", min=0, max=_sliding_window_size_max, step=_sliding_window_size_step, visible=_show_if_flag("sub_parallel_windows"))
@@ -523,9 +529,9 @@ _add_setting("sliding_window_trim_first_frames", "Trim First Frames in First Win
 _add_setting("temperature", "Temperature", "number", min=0.1, max=1.5, step=0.01, visible=_show_if(_temperature_visible), containers=("temperature_row",))
 _add_setting("top_p", "Top-p", "number", min=0.0, max=1.0, step=0.01, visible=_show_if_flag("top_p_slider"), containers=("top_pk_row",))
 _add_setting("top_k", "Top-k (0 = disabled)", "integer", min=0, max=100, step=1, visible=_show_if_flag("top_k_slider"), containers=("top_pk_row",))
-_add_setting("NAG_scale", "NAG Scale", "number", min=1.0, max=20.0, step=0.01, containers=("NAG_col",))
-_add_setting("NAG_tau", "NAG Tau", "number", min=1.0, max=5.0, step=0.01, containers=("NAG_col",))
-_add_setting("NAG_alpha", "NAG Alpha", "number", min=0.0, max=2.0, step=0.01, containers=("NAG_col",))
+_add_setting("NAG_scale", _model_setting_label("NAG_scale", "NAG Scale"), "number", min=_model_setting_bound("NAG_scale", "min", 1.0), max=_model_setting_bound("NAG_scale", "max", 20.0), step=_model_setting_bound("NAG_scale", "step", 0.01), containers=("NAG_col",))
+_add_setting("NAG_tau", _model_setting_label("NAG_tau", "NAG Tau"), "number", min=_model_setting_bound("NAG_tau", "min", 1.0), max=_model_setting_bound("NAG_tau", "max", 5.0), step=_model_setting_bound("NAG_tau", "step", 0.01), containers=("NAG_col",))
+_add_setting("NAG_alpha", _model_setting_label("NAG_alpha", "NAG Alpha"), "number", min=_model_setting_bound("NAG_alpha", "min", 0.0), max=_model_setting_bound("NAG_alpha", "max", 2.0), step=_model_setting_bound("NAG_alpha", "step", 0.01), containers=("NAG_col",))
 _add_setting("pace", _custom_label("pace", "Pace"), _custom_type("pace", "number"), min=_custom_bound("pace", "min", 0.2), max=_custom_bound("pace", "max", 1.0), custom=True, visible=_show_if_custom("pace"))
 _add_setting("exaggeration", _custom_label("exaggeration", "Exaggeration"), _custom_type("exaggeration", "number"), min=_custom_bound("exaggeration", "min", 0.25), max=_custom_bound("exaggeration", "max", 2.0), custom=True, visible=_show_if_custom("exaggeration"))
 

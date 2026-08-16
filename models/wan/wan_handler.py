@@ -9,11 +9,15 @@ from PIL import Image
 from shared.utils.hf import build_hf_url
 from shared.utils import files_locator as fl
 from .bernini_prompt_infos import get_bernini_infos, get_bernini_prompt_infos
+from .shotplan_prompt_infos import SHOTPLAN_PROMPT_ENHANCER, SHOTPLAN_PROMPT_INFOS
 from .vace_infos import VACE_INFOS
 from .kiwi.variant_config import get_kiwi_variant_model_def
 from .scail2 import (
     SCAIL2_ANIMATE_PREPROCESSING_POSE,
     SCAIL2_ANIMATE_PREPROCESSING_RAW,
+    SCAIL2_INJECT_REF_FRAMES_NO,
+    SCAIL2_INJECT_REF_FRAMES_SETTING,
+    SCAIL2_INJECT_REF_FRAMES_YES,
     SCAIL2_INFOS,
     custom_image_ref_postprocessor_scail2,
     custom_preprocess_scail2,
@@ -26,10 +30,13 @@ def test_vace(base_model_type):
     return base_model_type in ["vace_14B", "vace_14B_2_2", "vace_1.3B", "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B", "vace_ditto_14B"]     
 
 def test_class_i2v(base_model_type):
-    return base_model_type in ["i2v", "i2v_2_2", "fun_inp_1.3B", "fun_inp", "flf2v_720p",  "fantasy",  "multitalk", "infinitetalk", "i2v_2_2_multitalk", "animate", "chrono_edit", "steadydancer", "wanmove", "scail", "scail2_14B", "scail2_1.3B", "i2v_2_2_svi2pro" ]
+    return base_model_type in ["i2v", "i2v_2_2", "fun_inp_1.3B", "fun_inp", "flf2v_720p",  "fantasy",  "multitalk", "infinitetalk", "i2v_2_2_multitalk", "animate", "animate2", "chrono_edit", "steadydancer", "wanmove", "scail", "scail2_14B", "scail2_1.3B", "i2v_2_2_svi2pro" ]
 
 def test_class_t2v(base_model_type):    
-    return base_model_type in ["t2v", "t2v_2_2", "alpha", "alpha2", "lynx", "vista4d", "bernini", "bernini_1.3B"]
+    return base_model_type in ["t2v", "t2v_2_2", "shotplan_t2v", "shotplan_t2v_2_2", "alpha", "alpha2", "lynx", "vista4d", "bernini", "bernini_1.3B"]
+
+def test_shotplan(base_model_type):
+    return base_model_type in ["shotplan_t2v", "shotplan_t2v_2_2"]
 
 def test_oneframe_overlap(base_model_type):
     return test_class_i2v(base_model_type) and not (test_multitalk(base_model_type) or base_model_type in ["animate", "scail"] or test_scail2(base_model_type) or test_svi2pro(base_model_type))  or test_wan_5B(base_model_type)
@@ -67,7 +74,7 @@ class family_handler():
     def query_supported_types():
         return ["multitalk", "infinitetalk", "fantasy", "vace_14B", "vace_14B_2_2", "vace_multitalk_14B", "vace_standin_14B", "vace_lynx_14B",
                     "t2v_1.3B", "standin", "lynx_lite", "lynx", "t2v", "t2v_2_2", "vace_1.3B", "vace_ditto_14B", "phantom_1.3B", "phantom_14B",
-                    "recam_1.3B", "animate", "alpha", "alpha2", "alpha_lynx", "chrono_edit",
+                    "recam_1.3B", "animate", "animate2", "alpha", "alpha2", "alpha_lynx", "chrono_edit", "shotplan_t2v", "shotplan_t2v_2_2",
                     "i2v", "i2v_2_2", "i2v_2_2_multitalk", "ti2v_2_2", "lucy_edit", "kiwi_edit", "flf2v_720p", "fun_inp_1.3B", "fun_inp", "mocha", "steadydancer", "wanmove", "scail", "scail2_14B", "scail2_1.3B", "vista4d", "i2v_2_2_svi2pro", "bernini", "bernini_1.3B"]
 
 
@@ -141,12 +148,16 @@ class family_handler():
         )
     @staticmethod
     def get_lora_dir(base_model_type, args, lora_root):
+        if test_shotplan(base_model_type):
+            return os.path.join(lora_root, "wan_shotplan_2_2" if base_model_type == "shotplan_t2v_2_2" else "wan_shotplan")
         i2v = test_class_i2v(base_model_type) and not test_i2v_2_2(base_model_type)
         wan_dir = getattr(args, "lora_dir_wan", None) or getattr(args, "lora_dir", None) or os.path.join(lora_root, "wan")
         wan_i2v_dir = getattr(args, "lora_dir_wan_i2v", None) or getattr(args, "lora_dir_i2v", None) or os.path.join(lora_root, "wan_i2v")
         wan_1_3b_dir = getattr(args, "lora_dir_wan_1_3b", None) or os.path.join(lora_root, "wan_1.3B")
         wan_5b_dir = getattr(args, "lora_dir_wan_5b", None) or os.path.join(lora_root, "wan_5B")
 
+        if base_model_type == "animate2":
+            return os.path.join(lora_root, "wan_animate2")
         if test_scail2(base_model_type):
             return wan_i2v_dir
         if i2v:
@@ -224,7 +235,39 @@ class family_handler():
         extra_model_def["wan_5B_class"] = wan_5B = test_wan_5B(base_model_type)        
         extra_model_def["vace_class"] = vace_class = test_vace(base_model_type)
         extra_model_def["bernini_class"] = bernini = test_bernini(base_model_type)
+        extra_model_def["shotplan"] = shotplan = test_shotplan(base_model_type)
         extra_model_def["scail2"] = scail2 = test_scail2(base_model_type)
+        animate2 = base_model_type == "animate2"
+        extra_model_def["animate2"] = animate2
+        if animate2:
+            extra_model_def.update({
+                "no_steps_skipping": True,
+                "custom_settings": [{
+                    "id": "animate2_kv_cache",
+                    "name": "KV cache",
+                    "label": "Animate 2 KV Cache",
+                    "type": "dropdown",
+                    "default": "Disabled",
+                    "choices": [("Disabled", "Disabled"), ("GPU (faster, high VRAM)", "Enabled"), ("RAM (lower VRAM)", "RAM")],
+                    "info": "Caches the driving-video branch. GPU is fastest but uses substantial VRAM; RAM transfers each layer to the GPU as needed.",
+                }],
+            })
+        if shotplan:
+            extra_model_def.update({
+                "prompt_infos": SHOTPLAN_PROMPT_INFOS,
+                "prompt_enhancer_def": {
+                    "selection": ["T"],
+                    "labels": {"TV": "An Enhanced ShotPlan Prompt Relay using existing Text Prompt"},
+                    "default": "",
+                },
+                "text_prompt_enhancer_instructions": SHOTPLAN_PROMPT_ENHANCER,
+                "video_prompt_enhancer_instructions": SHOTPLAN_PROMPT_ENHANCER,
+                "text_prompt_enhancer_max_tokens": 512,
+                "video_prompt_enhancer_max_tokens": 512,
+            })
+            if base_model_type == "shotplan_t2v_2_2":
+                extra_model_def["config_file2"] = "models/wan/configs/t2v_2_2.json"
+                extra_model_def["save_quantized_submodel2"] = False
         if vace_class:
             extra_model_def["infos"] = model_def.get("infos", VACE_INFOS)
         if bernini:
@@ -270,9 +313,14 @@ class family_handler():
         if bernini:
             profiles_dir = ["wan_bernini_1.3B", "wan_1.3B"] if base_model_type == "bernini_1.3B" else ["wan_bernini", "wan_2_2"]
             group = "wan2_2"
-        elif base_model_type in ["t2v_2_2", "vace_14B_2_2"] or test_i2v_2_2(base_model_type):
-            profiles_dir = "wan_2_2"
+        elif base_model_type == "animate2":
+            profiles_dir = "wan_i2v"
             group = "wan2_2"
+        elif base_model_type in ["t2v_2_2", "vace_14B_2_2", "shotplan_t2v_2_2"] or test_i2v_2_2(base_model_type):
+            profiles_dir = ["wan_shotplan_2_2", "wan_2_2"] if shotplan else "wan_2_2"
+            group = "wan2_2"
+        elif base_model_type == "shotplan_t2v":
+            profiles_dir = ["wan_shotplan", "wan"]
         elif scail2 or i2v:
             profiles_dir = "wan_i2v"
             if base_model_type in ["chrono_edit"]:
@@ -289,6 +337,9 @@ class family_handler():
 
         if  (test_class_t2v(base_model_type) or vace_class or base_model_type in ["chrono_edit"]) and not test_alpha(base_model_type):
             extra_model_def["vae_upsampler"] = [1,2]
+            if test_class_t2v(base_model_type) and not wan_5B:
+                extra_model_def["vae_upsamplers"] = {"qwen_vae_pid(1.5)": [1]}
+                extra_model_def["excluded_spatial_upsamplers"] = ["qwen_pid(1.5)"]
         extra_model_def["vae_block_size"] = 32 if test_wan_5B(base_model_type) or base_model_type in ["scail"] or scail2 else 16
 
         extra_model_def["profiles_dir"] = profiles_dir if isinstance(profiles_dir, list) else [profiles_dir]
@@ -313,7 +364,7 @@ class family_handler():
         extra_model_def.update({
         "frames_minimum" : frames_minimum,
         "frames_steps" : frames_steps, 
-        "sliding_window" : base_model_type in ["multitalk", "infinitetalk", "t2v", "t2v_2_2", "fantasy", "animate", "lynx"] or test_class_i2v(base_model_type) or test_wan_5B(base_model_type) or vace_class,  #"ti2v_2_2",
+        "sliding_window" : not shotplan and (base_model_type in ["multitalk", "infinitetalk", "t2v", "t2v_2_2", "fantasy", "animate", "lynx"] or test_class_i2v(base_model_type) or test_wan_5B(base_model_type) or vace_class),  #"ti2v_2_2",
         "multiple_submodels" : multiple_submodels,
         "guidance_max_phases" : 3,
         "perturbation" : True,
@@ -321,8 +372,8 @@ class family_handler():
         "cfg_zero" : True,
         "cfg_star" : True,
         "adaptive_projected_guidance" : True,  
-        "tea_cache" : not (base_model_type in ["i2v_2_2"] or test_wan_5B(base_model_type) or multiple_submodels),
-        "mag_cache" : True,
+        "tea_cache" : not shotplan and not (base_model_type in ["i2v_2_2"] or test_wan_5B(base_model_type) or multiple_submodels),
+        "mag_cache" : not shotplan,
         "keep_frames_video_guide_not_supported": base_model_type in ["infinitetalk"],
         "sample_solvers":[
                             ("unipc", "unipc"),
@@ -530,8 +581,9 @@ class family_handler():
                 "scale": 3,
                 "show_label": True,
             }
-            extra_model_def["fake_start_image"] = True
-            extra_model_def["fit_into_canvas_image_refs"] = 0            
+            if scail2:
+                extra_model_def["fake_start_image"] = True
+                extra_model_def["fit_into_canvas_image_refs"] = 0            
             extra_model_def["preprocess_all"] = preprocess_all_scail2 if scail2 else True
             extra_model_def["custom_preprocessor"] = "Preparing Scail2 Inputs" if scail2 else "Extracting 3D Pose (NLFPose)"
             extra_model_def["forced_guide_mask_inputs"] = True
@@ -568,6 +620,18 @@ class family_handler():
                     "label": "Image Ref Keyword content",
                     "type": "text",
                     "default": "human character",
+                    "video_prompt_type": "I",
+                })
+                extra_model_def["custom_settings"].append({
+                    "id": SCAIL2_INJECT_REF_FRAMES_SETTING,
+                    "name": "Inject Ref Frames in Video",
+                    "label": "Inject Ref Frames in Video",
+                    "type": "dropdown",
+                    "default": SCAIL2_INJECT_REF_FRAMES_NO,
+                    "choices": [
+                        (SCAIL2_INJECT_REF_FRAMES_NO, SCAIL2_INJECT_REF_FRAMES_NO),
+                        (SCAIL2_INJECT_REF_FRAMES_YES, SCAIL2_INJECT_REF_FRAMES_YES),
+                    ],
                     "video_prompt_type": "I",
                 })
                 extra_model_def["image_ref_choices"] = {
@@ -652,6 +716,53 @@ class family_handler():
             extra_model_def["no_background_removal"] = True
             extra_model_def["fit_into_canvas_image_refs"] = 0
             extra_model_def["guidance_max_phases"] = 0            
+
+        if animate2:
+            extra_model_def.update({
+                "guide_custom_choices": {
+                    "choices": [("Animate Character using the Driving Video", "UV")],
+                    "default": "UV",
+                    "letters_filter": "UV",
+                    "label": "Type of Process",
+                    "visible": False,
+                    "show_label": False,
+                },
+                "guide_preprocessing": {
+                    "selection": ["UV"],
+                    "labels": {"UV": "Driving Video"},
+                    "visible": False,
+                },
+                "image_ref_choices": {
+                    "choices": [("Use Start / Continue Frame", ""), ("Use Character Reference Image", "I")],
+                    "default": "",
+                    "letters_filter": "I",
+                    "label": "Character Reference",
+                    "show_label": True,
+                },
+                "alt_prompt": {
+                    "label": "Driving Video Prompt",
+                    "placeholder": "Describe the action and background in the driving video.",
+                    "lines": 2,
+                },
+                "fake_start_image": True,
+                "return_image_refs_tensor": True,
+                "no_background_removal": True,
+                "fit_into_canvas_image_refs": 1,
+                "control_video_trim": True,
+                "keep_frames_video_guide_not_supported": True,
+                "extract_guide_from_window_start": True,
+                "color_correction": False,
+                "guidance_max_phases": 1,
+                "perturbation": False,
+                "tea_cache": False,
+                "mag_cache": False,
+                "self_refiner": False,
+                "NAG": False,
+                "cfg_star": False,
+                "cfg_zero": False,
+                "adaptive_projected_guidance": False,
+                "sub_parallel_windows": False,
+            })
 
         if base_model_type in ["animate"]:
             extra_model_def["guide_custom_choices"] = {
@@ -842,7 +953,9 @@ class family_handler():
 
         if bernini:
             image_prompt_types_allowed = "T"
-        elif vace_class or base_model_type in ["animate", "t2v", "t2v_2_2", "lynx"] :
+        elif animate2:
+            image_prompt_types_allowed = "TSVL"
+        elif vace_class or base_model_type in ["animate", "t2v", "t2v_2_2", "shotplan_t2v", "shotplan_t2v_2_2", "lynx"] :
             image_prompt_types_allowed = "TVL"
         elif base_model_type in ["infinitetalk"]:
             image_prompt_types_allowed = "TSVL"
@@ -876,7 +989,7 @@ class family_handler():
             extra_model_def["background_removal_color"] = [128, 128, 128]  
         if base_model_type in ["fantasy"] or multitalk:
             extra_model_def["audio_guidance"] = True
-        extra_model_def["NAG"] = (vace_class or t2v or i2v) and not bernini
+        extra_model_def["NAG"] = (vace_class or t2v or i2v) and not (bernini or animate2)
 
         if test_oneframe_overlap(base_model_type):
             extra_model_def["sliding_window_defaults"] = { "overlap_min" : 1, "overlap_max" : 1, "overlap_step": 0, "overlap_default": 1}
@@ -894,6 +1007,7 @@ class family_handler():
     def get_rgb_factors(base_model_type ):
         from shared.RGB_factors import get_rgb_factors
         if test_wan_5B(base_model_type): base_model_type = "ti2v_2_2"
+        if base_model_type == "animate2": base_model_type = "i2v"
         latent_rgb_factors, latent_rgb_factors_bias = get_rgb_factors("wan", base_model_type)
         return latent_rgb_factors, latent_rgb_factors_bias
     
@@ -1247,7 +1361,23 @@ class family_handler():
                 "mask_expand": 20,
                 "audio_prompt_type": "R",
                 "remove_background_images_ref" : 0,
-	            "force_fps": "control",
+                "force_fps": "control",
+            })
+        elif base_model_type == "animate2":
+            ui_defaults.update({
+                "video_prompt_type": "UV",
+                "image_prompt_type": "S",
+                "video_length": 65,
+                "sliding_window_size": 65,
+                "num_inference_steps": 40,
+                "flow_shift": 5,
+                "guidance_scale": 3.0,
+                "sample_solver": "dpm++",
+                "remove_background_images_ref": 0,
+                "force_fps": "control",
+                "alt_prompt": model_def["animate2_ref_prompt"],
+                "prompt_enhancer": "",
+                "custom_settings": {"animate2_kv_cache": "Disabled"},
             })
         elif base_model_type in ["vace_ditto_14B"]:
             ui_defaults.update({ 
@@ -1291,6 +1421,7 @@ class family_handler():
                 "custom_settings": {
                     "scail2_animate_preprocessing": SCAIL2_ANIMATE_PREPROCESSING_RAW,
                     "image_ref_keyword_content": "human character",
+                    SCAIL2_INJECT_REF_FRAMES_SETTING: SCAIL2_INJECT_REF_FRAMES_NO,
                 },
             })
 
@@ -1323,7 +1454,13 @@ class family_handler():
     
     @staticmethod
     def validate_generative_settings(base_model_type, model_def, inputs):
-        if test_scail2(base_model_type):
+        if base_model_type == "animate2":
+            image_prompt_type = inputs.get("image_prompt_type", "") or ""
+            video_prompt_type = inputs.get("video_prompt_type", "") or ""
+            if "I" not in video_prompt_type and not any(flag in image_prompt_type for flag in "SVL"):
+                return "Wan Animate 2 needs a Character Reference Image, Start Image, Continue Video, or Continue Last Video."
+
+        elif test_scail2(base_model_type):
             image_prompt_type = inputs.get("image_prompt_type", "") or ""
             video_prompt_type = inputs.get("video_prompt_type", "") or ""
             if test_scail2_replace(video_prompt_type):

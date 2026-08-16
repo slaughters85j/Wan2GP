@@ -471,7 +471,7 @@ class WanGPSession:
     def list_model_defs(self, *, family: str | Sequence[str] | None = None, base_model_type: str | Sequence[str] | None = None, finetune: bool | str | None = None, model_type: str | Sequence[str] | None = None, main_output: str | Sequence[str] | None = None, inputs: str | Sequence[str] | None = None) -> list[dict[str, Any]]:
         runtime = self._ensure_runtime()
         with _pushd(runtime.root):
-            return runtime.module.list_model_defs(family=family, base_model_type=base_model_type, finetune=finetune, model_type=model_type, main_output=main_output, inputs=inputs)
+            return _strip_model_def_callables(runtime.module.list_model_defs(family=family, base_model_type=base_model_type, finetune=finetune, model_type=model_type, main_output=main_output, inputs=inputs))
 
     def get_model_defs(self, **filters: Any) -> list[dict[str, Any]]:
         return self.list_model_defs(**filters)
@@ -495,7 +495,7 @@ class WanGPSession:
             return None
         model_def = copy.deepcopy(model_def)
         model_def["model_type"] = str(model_type)
-        return model_def
+        return _strip_model_def_callables(model_def)
 
     def get_model_metadata(self, model_type: str, include_availability: bool = False) -> dict[str, Any] | None:
         model_def = self.get_model_def(model_type)
@@ -1119,7 +1119,7 @@ class WanGPSession:
 
     @staticmethod
     def _phase_supports_progress(phase: str | None) -> bool:
-        return str(phase or "") in {"inference", "inference_stage_1", "inference_stage_2", "inference_stage_3"}
+        return str(phase or "") in {"encoding_text", "inference", "inference_stage_1", "inference_stage_2", "inference_stage_3", "decoding"}
 
     @staticmethod
     def _estimate_progress(phase: str, current_step: int | None, total_steps: int | None) -> int:
@@ -1232,6 +1232,16 @@ def _apply_edit_settings_overrides(settings: dict[str, Any], settings_overrides:
         options["return_media"] = True
     if options:
         settings["_api"] = options
+
+
+def _strip_model_def_callables(value: Any) -> Any:
+    if callable(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _strip_model_def_callables(item) for key, item in value.items() if not callable(item)}
+    if isinstance(value, (list, tuple)):
+        return [_strip_model_def_callables(item) for item in value if not callable(item)]
+    return value
 
 
 def _model_availability_to_dict(model_type: str, status: int) -> dict[str, Any]:

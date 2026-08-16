@@ -12,6 +12,7 @@ from ..embeddings_connector import Embeddings1DConnector
 from ..feature_extractor import GemmaFeaturesExtractorProjLinear
 from ..tokenizer import LTXVGemmaTokenizer
 from shared.utils import files_locator as fl
+from shared.utils.gguf_mapping import has_standard_gguf_tensor_names, remap_state_dict_triplet
 from .....ltx2_handler import  _GEMMA_FOLDER, family_handler
 
 import os
@@ -51,7 +52,8 @@ class GemmaTextEncoderModelBase(torch.nn.Module):
         token_pairs = self.tokenizer.tokenize_with_weights(text)["gemma"]
         input_ids = torch.tensor([[t[0] for t in token_pairs]], device=self.model.device)
         attention_mask = torch.tensor([[w[1] for w in token_pairs]], device=self.model.device)
-        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+        language_model = self.model.model if hasattr(self.model, "model") else self.model
+        outputs = language_model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True, use_cache=False)
         return RawTextEmbeddings(outputs.hidden_states, attention_mask, padding_side)
 
     def _run_feature_extractor(
@@ -307,44 +309,168 @@ def _find_merged_gemma_file(gemma_root: str) -> str | None:
     return None
 
 
-def _preprocess_gemma_state_dict(sd, qm, twm):
+@functools.lru_cache(maxsize=4)
+def _gemma3_gguf_name_map(config_path: str) -> dict[str, str]:
+    from accelerate import init_empty_weights
+    from transformers import AutoConfig
+    from transformers.modeling_gguf_pytorch_utils import get_gguf_hf_weights_map
+
+    config = AutoConfig.from_pretrained(config_path, local_files_only=True)
+    with init_empty_weights():
+        model = Gemma3ForCausalLM(config)
+    return get_gguf_hf_weights_map(model)
+
+
+@functools.lru_cache(maxsize=2)
+def _gemma4_gguf_name_map(config_path: str) -> dict[str, str]:
+    import json
+
+    with open(config_path, "r", encoding="utf-8") as reader:
+        config = json.load(reader)
+    name_map = {
+        "token_embd.weight": "model.embed_tokens.weight",
+        "output.weight": "lm_head.weight",
+        "output_norm.weight": "model.norm.weight",
+    }
+    layer_suffixes = {
+        "attn_q.weight": "self_attn.q_proj.weight",
+        "attn_q_norm.weight": "self_attn.q_norm.weight",
+        "attn_k.weight": "self_attn.k_proj.weight",
+        "attn_k_norm.weight": "self_attn.k_norm.weight",
+        "attn_v.weight": "self_attn.v_proj.weight",
+        "attn_output.weight": "self_attn.o_proj.weight",
+        "ffn_gate.weight": "mlp.gate_proj.weight",
+        "ffn_down.weight": "mlp.down_proj.weight",
+        "ffn_up.weight": "mlp.up_proj.weight",
+        "attn_norm.weight": "input_layernorm.weight",
+        "post_attention_norm.weight": "post_attention_layernorm.weight",
+        "ffn_norm.weight": "pre_feedforward_layernorm.weight",
+        "post_ffw_norm.weight": "post_feedforward_layernorm.weight",
+        "layer_output_scale.weight": "layer_scalar",
+    }
+    for layer_index in range(config["num_hidden_layers"]):
+        for gguf_suffix, model_suffix in layer_suffixes.items():
+            name_map[f"blk.{layer_index}.{gguf_suffix}"] = f"model.layers.{layer_index}.{model_suffix}"
+    return name_map
+
+
+def _force_gemma_tied_embeddings(tied_weights_map):
+    source = "model.embed_tokens.weight"
+    target = "lm_head.weight"
+    tied_weights_map = dict(tied_weights_map or {})
+
+    # Make the embedding the sole source for lm_head even if checkpoint metadata
+    # describes a different relationship.
+    for name, tied_names in list(tied_weights_map.items()):
+        filtered = [tied_name for tied_name in tied_names if tied_name != target]
+        if filtered:
+            tied_weights_map[name] = filtered
+        else:
+            tied_weights_map.pop(name)
+    tied_weights_map.setdefault(source, []).append(target)
+    return tied_weights_map
+
+
+def _preprocess_gemma_state_dict(sd, qm, twm, config_path=None):
     if len(sd) == 0:
-        return sd
+        return sd, qm, twm
+
+    if has_standard_gguf_tensor_names(sd):
+        if config_path is None:
+            config_path = fl.locate_file(os.path.join(_GEMMA_FOLDER, "config_light.json"))
+        original = (sd, qm, twm)
+        sd, qm, twm = remap_state_dict_triplet(
+            sd,
+            qm,
+            twm,
+            _gemma3_gguf_name_map(os.path.abspath(config_path)),
+            keep_unmapped=False,
+        )
+        if "model.embed_tokens.weight" not in sd:
+            sd, qm, twm = original
+        else:
+            # GGUF folds Gemma's `1 + weight` RMSNorm offset into the stored tensor.
+            for name, tensor in sd.items():
+                if "norm.weight" in name:
+                    sd[name] = tensor - 1
+
     sd.pop("spiece_model", None)
     from mmgp.offload import map_state_dict
     rules = {"model.language_model": "model",  "model.vision_tower": None, "model.multi_modal_projector": None, "multi_modal_projector": None }
     sd, qm, twm = map_state_dict([sd, qm, twm], rules=rules)
 
-    if twm is None or len(twm)==0:
-        twm = {"model.embed_tokens.weight": ["lm_head.weight"]}
+    if "model.embed_tokens.weight" in sd:
+        twm = _force_gemma_tied_embeddings(twm)
 
     return sd, qm, twm
 
 
+def _preprocess_gemma4_state_dict(sd, qm, twm, config_path: str):
+    if len(sd) == 0:
+        return sd, qm, twm
+    if has_standard_gguf_tensor_names(sd):
+        sd, qm, twm = remap_state_dict_triplet(sd, qm, twm, _gemma4_gguf_name_map(os.path.abspath(config_path)), keep_unmapped=False)
+    sd.pop("tokenizer_json", None)
+    from mmgp.offload import map_state_dict
+    sd, qm, twm = map_state_dict(
+        [sd, qm, twm],
+        rules={
+            "text_embedding_projection": None,
+            "vision_model": None,
+            "multi_modal_projector": None,
+            "audio_projector": None,
+            "hf_asset__chat_template": None,
+            "hf_asset__generation_config": None,
+            "hf_asset__processor_config": None,
+            "hf_asset__tokenizer_config": None,
+        },
+    )
+    if "model.embed_tokens.weight" in sd:
+        twm = _force_gemma_tied_embeddings(twm)
+    return sd, qm, twm
+
+
 def build_gemma_text_encoder(
-    gemma_root: str, default_dtype: torch.dtype = torch.bfloat16
+    gemma_root: str,
+    default_dtype: torch.dtype = torch.bfloat16,
+    side_files_root: str | None = None,
 ) -> GemmaTextEncoderModelBase:
 
     gemma_path = gemma_root
     if not gemma_path or not os.path.isfile(gemma_path):
         raise FileNotFoundError(f"Gemma checkpoint not found: {gemma_root}")
-    gemma_dir = os.path.dirname(gemma_path)
-    tokenizer_path = fl.locate_folder(os.path.join(_GEMMA_FOLDER))
-    config_path = fl.locate_file(os.path.join(_GEMMA_FOLDER, "config_light.json"))
+    side_files_root = fl.locate_folder(side_files_root or _GEMMA_FOLDER)
+    tokenizer_path = side_files_root
+    gemma4_config_path = os.path.join(side_files_root, "config.json")
+    if os.path.isfile(gemma4_config_path):
+        import json
+        with open(gemma4_config_path, "r", encoding="utf-8") as reader:
+            gemma4 = json.load(reader).get("model_type") == "gemma4_unified_text"
+    else:
+        gemma4 = False
+    config_path = gemma4_config_path if gemma4 else os.path.join(side_files_root, "config_light.json")
+    preprocess_sd = functools.partial(_preprocess_gemma4_state_dict, config_path=config_path) if gemma4 else functools.partial(_preprocess_gemma_state_dict, config_path=config_path)
     from accelerate import init_empty_weights
     with init_empty_weights():
         text_encoder = GemmaTextEncoderModelBase(feature_extractor_linear=None, tokenizer=None, model=None, dtype=default_dtype)
+    if gemma4:
+        from ..gemma4_unified import Gemma4UnifiedForCausalLM, register_gemma4_config
+        register_gemma4_config()
+        model_class = Gemma4UnifiedForCausalLM
+    else:
+        model_class = Gemma3ForCausalLM
     text_encoder.model = offload.fast_load_transformers_model(
         gemma_path,
-        modelClass=Gemma3ForCausalLM, #Gemma3ForConditionalGeneration,
+        modelClass=model_class,
         defaultConfigPath=config_path,
         writable_tensors=False,
-        preprocess_sd=_preprocess_gemma_state_dict,
+        preprocess_sd=preprocess_sd,
         forcedConfigPath= config_path,
         default_dtype=default_dtype,
+        ignore_unused_weights=gemma4,
     )
-    text_encoder.tokenizer = LTXVGemmaTokenizer(tokenizer_path, 1024)
-    text_encoder._gemma_root = gemma_dir
+    text_encoder.tokenizer = LTXVGemmaTokenizer(tokenizer_path, 1024, fix_mistral_regex=gemma4)
+    text_encoder._gemma_root = side_files_root
 
     return text_encoder
 

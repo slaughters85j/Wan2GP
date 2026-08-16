@@ -10,6 +10,14 @@ LTX2_INFOS = """
 - Ingredients Reference Sheet: 22B can use one composite reference-sheet image with the Ingredients IC-LoRA to keep characters, props, and location consistent.
 - EditAnything variants: provide a source/control video plus one reference image to add or edit a subject in the video.
 
+## VAE Decoder Choices
+
+Choose the decoder from the `VAE` system configuration:
+
+- `Default VAE`: the original decoder and default choice. It offers the best balance of speed, quality, and VRAM use for normal generation.
+- `PrunaAI VAE (faster, slightly worse quality)`: an optimized alternative available for both LTX-2.3 and LTX-2.5.
+- `NAD Diffusion Decoder (slower, higher VRAM, better motion)`: an optional diffusion decoder that supports tiled decoding and automatically uses its Triton accelerator when a compatible Triton version is available; the console reports whether the Triton or standard implementation is active. NAD is available for both LTX-2.3 and LTX-2.5.
+
 ## Text To Image Mode
 
 LTX2 image generation is implemented by generating a short video internally and keeping only the first frame.
@@ -61,14 +69,13 @@ Example: if you continue a 4 second source video and your soundtrack starts with
 
 # Advanced
 
-## Changing System LoRA Weights
+## Changing System LoRA 
 
-LTX2 automatically adds some system LoRAs when a feature needs them. To change one of their weights, manually select a LoRA whose filename contains the same recognized signature, then set its multiplier in the LoRAs tab. Because your selected LoRA has the recognized signature, WanGP skips the automatic default and uses your selected one instead.
-
-Use a single number for one weight, such as `0.7`. Use `phase1;phase2` for two-phase generation, such as `0;1`, `1;0`, or `0.25;0.5`.
+LTX2 automatically adds some system LoRAs when a feature needs them. Each system LoRA comes with predefined LoRA Multipliers that may adjust to the context. 
+You can change the LoRA used for a system process and the LoRA multipliers that will used for this LoRA.
+A selected LoRA will be automatically used instead of a system LoRA if it contains in its name a text sequence signature.
 
 Recognized system LoRA signatures:
-
 - `distilled-lora`: distilled stage LoRA used by dev models for two-phase, Distilled 8 Steps, HQ/res2s, and some ID-LoRA cases.
 - `union-control`: IC-LoRA used by Pose, Pose Alignment, Depth, and Canny control.
 - `ic-lora-hdr`: HDR IC-LoRA used by 22B HDR output.
@@ -77,7 +84,19 @@ Recognized system LoRA signatures:
 - `ic-lora-ingredients`: Ingredients IC-LoRA used by the 22B Ingredients Reference Sheet process.
 - `id-lora-celebvhq`: ID-LoRA used by the reference voice workflow.
 
+To change one of these, manually select a LoRA whose filename contains the same recognized signature, then set its multipliers in the LoRAs tab. Because your selected LoRA has the recognized signature, WanGP skips the automatic default and uses your selected one instead.
+
+Use a single number for one weight, such as `0.7`. Use `phase1;phase2` for two-phase generation, such as `0;1`, `1;0`, or `0.25;0.5`.
+
+
 Examples:
+
+```text
+Select: custom-distilled-lora-v2.safetensors
+Multiplier: 0.3;0.7
+Filename rule: it contains "distilled-lora"
+Result: the dev model uses your custom distilled LoRA instead of the default distilled LoRA and and it will apply your choices of LoRA multipliers.
+```
 
 ```text
 Select: ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors
@@ -92,12 +111,6 @@ Filename rule: it contains "ic-lora-outpaint"
 Result: 22B outpainting uses your outpaint LoRA instead of the built-in one.
 ```
 
-```text
-Select: custom-distilled-lora-v2.safetensors
-Multiplier: 0.3;0.7
-Filename rule: it contains "distilled-lora"
-Result: the dev model uses your distilled LoRA schedule instead of the default distilled LoRA.
-```
 
 ```text
 Select: my-id-lora-celebvhq-voice.safetensors
@@ -106,6 +119,8 @@ Filename rule: it contains "id-lora-celebvhq"
 Result: the reference voice workflow uses your ID-LoRA file and weight.
 ```
 """
+
+LTX2_25_INFOS = LTX2_INFOS
 
 LTX2_MSR_INFOS = """
 # LTX2 Multiple Subject Reference
@@ -128,4 +143,20 @@ Subject or object references work best on a plain white background. If your non-
 Character sheets are recommended for character references: use an image that shows the same character from several points of view, poses, or close-up/detail angles. This gives MSR more identity and clothing information than a single portrait.
 
 Use the text prompt to describe how the referenced subjects should appear together in the referenced environment.
+"""
+
+LTX2_MSR_V2_INFOS = LTX2_MSR_INFOS + """
+
+## **MSR Reference Video Length** (MSR V2 only)
+
+Leave this on `Auto` for normal use. WanGP automatically gives each uploaded subject enough reference space and keeps the background separate:
+
+- 1 subject: `17`
+- 2 subjects: `33`
+- 3 subjects: `49`
+- 4 subjects: `65`
+
+Choose `17` to `65` manually only when you want to experiment with reference strength or reduce memory use. This setting changes how the uploaded images are prepared; it does not change the generated video length. Missing or older saved settings behave like `Auto`.
+
+MSR V2 keeps subject references separate from the background and generally preserves identities and multi-subject scenes better than V1.
 """
