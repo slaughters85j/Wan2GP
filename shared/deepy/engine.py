@@ -5546,7 +5546,7 @@ class AssistantEngine:
         self._action_budget_logged = False
         bind_runtime_tools = getattr(self.tool_box, "bind_runtime_tools", None)
         if callable(bind_runtime_tools):
-            bind_runtime_tools(vision_query_callback=self._run_visual_query, tool_progress_callback=self._handle_tool_progress, vision_is_remote=False)
+            bind_runtime_tools(vision_query_callback=self._run_visual_query, tool_progress_callback=self._handle_tool_progress, vision_is_remote=remote_runtime.remote_backend_active())
 
     def _log(self, message: str) -> None:
         if self.debug_enabled:

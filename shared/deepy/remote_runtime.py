@@ -449,7 +449,28 @@ def run_remote_turn(engine, user_text: str, *, max_new_tokens: int = 1024, tempe
         engine._emit_stats(force=True)
 
 
-def _image_to_data_url(media_record: dict[str, Any], frame_no: int | None) -> str:
+def _resolve_record_frame_no(media_record: dict[str, Any], frame_no: int | None) -> int:
+    """Frame requested for this record: the explicit argument wins, else the record's own frame."""
+    if frame_no is not None:
+        return int(frame_no)
+    record_frame = media_record.get("frame_no")
+    return 0 if record_frame is None else int(record_frame)
+
+
+def _downscale_to_pixel_budget(image, max_image_edge: int | None):
+    """Match the local path's per-image pixel budget so remote payloads stay comparable."""
+    if max_image_edge is None:
+        return image
+    budget = int(max_image_edge) * int(max_image_edge)
+    width, height = image.size
+    pixels = width * height
+    if budget <= 0 or pixels <= budget:
+        return image
+    scale = (budget / pixels) ** 0.5
+    return image.resize((max(1, int(width * scale)), max(1, int(height * scale))))
+
+
+def _image_to_data_url(media_record: dict[str, Any], frame_no: int | None, max_image_edge: int | None = None) -> str:
     import os
 
     from PIL import Image
@@ -463,14 +484,14 @@ def _image_to_data_url(media_record: dict[str, Any], frame_no: int | None) -> st
     if media_type == "video":
         image = get_video_frame(
             media_path,
-            0 if frame_no is None else int(frame_no),
+            _resolve_record_frame_no(media_record, frame_no),
             return_last_if_missing=True,
             return_PIL=True,
         )
     else:
         with Image.open(media_path) as handle:
             image = handle.copy()
-    return _pil_to_data_url(image)
+    return _pil_to_data_url(_downscale_to_pixel_budget(image, max_image_edge))
 
 
 def run_remote_vision_query(engine, media_record: dict[str, Any] | list[dict[str, Any]], question: str, frame_no: int | None = None, max_image_edge: int | None = None) -> dict[str, Any]:
@@ -481,14 +502,15 @@ def run_remote_vision_query(engine, media_record: dict[str, Any] | list[dict[str
 
     def _describe(input_index: int, record: dict[str, Any]) -> dict[str, Any]:
         record_type = str(record.get("media_type", "")).strip().lower()
+        time_seconds = record.get("time_seconds")
         return {
             "input_index": input_index + 1,
             "media_id": record.get("media_id", ""),
             "media_type": record_type,
             "label": record.get("label", ""),
-            "frame_no": None if record_type != "video" else (0 if frame_no is None else int(frame_no)),
-            "time_seconds": None,
-            "bbox": None,
+            "frame_no": None if record_type != "video" else _resolve_record_frame_no(record, frame_no),
+            "time_seconds": None if time_seconds is None else float(time_seconds),
+            "bbox": record.get("bbox"),
         }
 
     inspected_media = [_describe(index, record) for index, record in enumerate(media_records)]
@@ -515,7 +537,7 @@ def run_remote_vision_query(engine, media_record: dict[str, Any] | list[dict[str
     if len(base_url) == 0 or len(model) == 0:
         return _error("Deepy remote backend is not configured.")
     try:
-        data_urls = [_image_to_data_url(record, frame_no) for record in media_records]
+        data_urls = [_image_to_data_url(record, frame_no, max_image_edge) for record in media_records]
     except Exception as exc:
         return _error(str(exc))
 
