@@ -473,60 +473,68 @@ def _image_to_data_url(media_record: dict[str, Any], frame_no: int | None) -> st
     return _pil_to_data_url(image)
 
 
-def run_remote_vision_query(engine, media_record: dict[str, Any], question: str, frame_no: int | None = None) -> dict[str, Any]:
+def run_remote_vision_query(engine, media_record: dict[str, Any] | list[dict[str, Any]], question: str, frame_no: int | None = None, max_image_edge: int | None = None) -> dict[str, Any]:
     """Answer an Inspect Media question using the remote vision-language model."""
-    media_type = str(media_record.get("media_type", "")).strip().lower()
+    media_records = [record for record in (media_record if isinstance(media_record, list) else [media_record]) if isinstance(record, dict)]
     question_text = str(question or "").strip()
     base_url, model, api_key = _remote_config()
 
-    def _error(message: str) -> dict[str, Any]:
+    def _describe(input_index: int, record: dict[str, Any]) -> dict[str, Any]:
+        record_type = str(record.get("media_type", "")).strip().lower()
         return {
-            "status": "error",
-            "media_id": media_record.get("media_id", ""),
-            "media_type": media_type,
-            "label": media_record.get("label", ""),
-            "frame_no": None if media_type != "video" else (0 if frame_no is None else int(frame_no)),
-            "question": question_text,
-            "answer": "",
-            "error": message,
+            "input_index": input_index + 1,
+            "media_id": record.get("media_id", ""),
+            "media_type": record_type,
+            "label": record.get("label", ""),
+            "frame_no": None if record_type != "video" else (0 if frame_no is None else int(frame_no)),
+            "time_seconds": None,
+            "bbox": None,
         }
 
+    inspected_media = [_describe(index, record) for index, record in enumerate(media_records)]
+
+    def _result(status: str, answer: str, error: str) -> dict[str, Any]:
+        result = {
+            "status": status,
+            "media_ids": [item["media_id"] for item in inspected_media],
+            "media": inspected_media,
+            "visual_count": len(inspected_media),
+            "question": question_text,
+            "answer": answer,
+            "error": error,
+        }
+        if len(inspected_media) == 1:
+            result.update(inspected_media[0])
+        return result
+
+    def _error(message: str) -> dict[str, Any]:
+        return _result("error", "", message)
+
+    if len(media_records) == 0:
+        return _error("No media was provided to inspect.")
     if len(base_url) == 0 or len(model) == 0:
         return _error("Deepy remote backend is not configured.")
     try:
-        data_url = _image_to_data_url(media_record, frame_no)
+        data_urls = [_image_to_data_url(record, frame_no) for record in media_records]
     except Exception as exc:
         return _error(str(exc))
 
+    content: list[dict[str, Any]] = [{"type": "text", "text": question_text}]
+    content.extend({"type": "image_url", "image_url": {"url": data_url}} for data_url in data_urls)
     messages = [
         {"role": "system", "content": VISION_QA_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": question_text},
-                {"type": "image_url", "image_url": {"url": data_url}},
-            ],
-        },
+        {"role": "user", "content": content},
     ]
     try:
-        content = _chat_completion_once(base_url, model, api_key, messages, temperature=0.2, top_p=0.9, max_tokens=_ONESHOT_COMPLETION_TOKENS)
+        completion = _chat_completion_once(base_url, model, api_key, messages, temperature=0.2, top_p=0.9, max_tokens=_ONESHOT_COMPLETION_TOKENS)
     except Exception as exc:
         return _error(str(exc))
 
-    _reasoning, answer = _partition("", str(content or "").strip())
+    _reasoning, answer = _partition("", str(completion or "").strip())
     answer = answer.strip()
     if len(answer) == 0:
         return _error("The remote vision model returned an empty answer.")
-    return {
-        "status": "done",
-        "media_id": media_record.get("media_id", ""),
-        "media_type": media_type,
-        "label": media_record.get("label", ""),
-        "frame_no": None if media_type != "video" else (0 if frame_no is None else int(frame_no)),
-        "question": question_text,
-        "answer": answer,
-        "error": "",
-    }
+    return _result("done", answer, "")
 
 
 __all__ = [
