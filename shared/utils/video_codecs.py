@@ -37,6 +37,13 @@ def get_video_container_extension(container: str | None) -> str:
     return f".{container}" if container in SUPPORTED_VIDEO_CONTAINERS else ".mp4"
 
 
+def _hevc_sample_entry_args(container: str) -> list[str]:
+    # Apple's AVFoundation (QuickTime playback, Finder thumbnails) only decodes HEVC in
+    # MP4/MOV when the sample entry is hvc1; FFmpeg's muxer defaults to hev1, which it
+    # refuses. The HDR path already tags hvc1 - see get_hdr_video_encode_args.
+    return ["-tag:v", "hvc1"] if container in {"mp4", "mov"} else []
+
+
 def _get_video_codec_spec(codec_key: str | None, container: str | None) -> tuple[str, str, list[str]]:
     codec_key = normalize_video_codec(codec_key)
     container = normalize_video_container(container)
@@ -45,9 +52,9 @@ def _get_video_codec_spec(codec_key: str | None, container: str | None) -> tuple
     if codec_key == "libx264_10":
         return "libx264", "yuv420p", ["-crf", "0"]
     if codec_key == "libx265_28":
-        return "libx265", "yuv420p", ["-crf", "28", "-x265-params", "log-level=none"]
+        return "libx265", "yuv420p", ["-crf", "28", "-x265-params", "log-level=none", *_hevc_sample_entry_args(container)]
     if codec_key == "libx265_8":
-        return "libx265", "yuv420p", ["-crf", "8", "-x265-params", "log-level=none"]
+        return "libx265", "yuv420p", ["-crf", "8", "-x265-params", "log-level=none", *_hevc_sample_entry_args(container)]
     if codec_key == "libx264_lossless":
         if container == "mkv":
             return "ffv1", "rgb24", []
