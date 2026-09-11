@@ -30,9 +30,16 @@ def allowed_paths() -> list[str]:
 
 
 def get_css() -> str:
+    # The gr.HTML block sits right under the centered title; collapse the block to
+    # zero height and pull the button up onto the title line, flush right.
     return """
-.wangp-cheat-sheet { position: absolute; top: 10px; right: 14px; z-index: 20; }
-.wangp-cheat-sheet button { font-size: 0.85em; padding: 4px 10px; border-radius: 8px; cursor: pointer;
+.wangp-cheat-sheet-block { height: 0 !important; min-height: 0 !important; padding: 0 !important; margin: 0 !important;
+  border: none !important; background: none !important; overflow: visible !important; }
+.wangp-cheat-sheet-block > * { overflow: visible !important; }
+.wangp-cheat-sheet { display: flex; justify-content: flex-end; padding-right: 8px; transform: translateY(-2.9em);
+  position: relative; z-index: 20; pointer-events: none; }
+.wangp-cheat-sheet a { pointer-events: auto; text-decoration: none; }
+.wangp-cheat-sheet button { font-size: 0.85em; padding: 4px 10px; border-radius: 8px; cursor: pointer; white-space: nowrap;
   border: 1px solid var(--border-color-primary); background: var(--background-fill-secondary); color: var(--body-text-color); }
 .wangp-cheat-sheet button:hover { background: var(--background-fill-primary); border-color: var(--color-accent); }
 """
