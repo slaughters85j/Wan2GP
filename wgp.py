@@ -44,6 +44,7 @@ from pathlib import Path
 from datetime import datetime
 import gradio as gr
 from shared.gradio import downloads as gradio_downloads
+from shared.gradio import cheat_sheet as _cheat_sheet
 from shared.gradio import gradio_model_switch_patch, gradio_queue_focus_patch, gradio_startup_patch, video_preview
 from gradio.themes.utils.sizes import Size
 import random
@@ -13721,6 +13722,7 @@ def create_ui():
     css += "\n" + model_output_filter.get_css()
     css += "\n" + model_selector_toolbar.get_css()
     css += "\n" + finetune_editor.get_css()
+    css += "\n" + _cheat_sheet.get_css()
     local_file_picker.configure_last_directory_store(server_config)
     UI_theme = server_config.get("UI_theme", "default")
     UI_theme  = args.theme if len(args.theme) > 0 else UI_theme
@@ -13760,6 +13762,7 @@ def create_ui():
 
     with gr.Blocks(css=css, js=js, theme=theme, title="WanGP", fill_width=True) as main:
         gr.Markdown(f'<div align=center><H1>Wan<SUP style="color: #2563eb;">GP</SUP> v{WanGP_version} <FONT SIZE=4>by <I>DeepBeepMeep</I></FONT> <FONT SIZE=3>') # (<A HREF='https://github.com/deepbeepmeep/Wan2GP'>Updates</A>)</FONT SIZE=3></H1></div>")
+        gr.HTML(_cheat_sheet.get_html(), visible=_cheat_sheet.exists())  # opens LORA_CHEAT_SHEET.html in a detached window
         global model_list
 
         tab_state = gr.State({ "tab_no":0 })
@@ -14188,7 +14191,7 @@ if __name__ == "__main__":
         server_name=server_name,
         server_port=server_port,
         share=args.share,
-        allowed_paths=list({save_path, image_save_path, audio_save_path, "icons"}),
+        allowed_paths=list({save_path, image_save_path, audio_save_path, "icons", *_cheat_sheet.allowed_paths()}),
     )
     # Gradio returns here once its server stops (Ctrl+C included). Its file cache
     # is never cleared on its own, so offer to clear it before the process exits.
