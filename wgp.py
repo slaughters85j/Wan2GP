@@ -64,6 +64,7 @@ from shared.utils.audio_video import truncate_audio, shift_audio_trim_ranges, tr
 from shared.utils.audio_metadata import read_audio_metadata, extract_creation_datetime_from_metadata, resolve_audio_creation_datetime
 from shared.utils.media_recording import record_file_metadata as shared_record_file_metadata
 from shared.utils import history_persistence as _history_persistence
+from shared.utils import gradio_cache as _gradio_cache
 from shared.components import history_browser as _history_browser
 from shared.utils.settings_bundle import is_wangp_settings_filename
 from shared.utils.video_decode import decode_video_frames_ffmpeg, probe_video_stream_metadata
@@ -14189,3 +14190,6 @@ if __name__ == "__main__":
         share=args.share,
         allowed_paths=list({save_path, image_save_path, audio_save_path, "icons"}),
     )
+    # Gradio returns here once its server stops (Ctrl+C included). Its file cache
+    # is never cleared on its own, so offer to clear it before the process exits.
+    _gradio_cache.prompt_purge_on_exit()
