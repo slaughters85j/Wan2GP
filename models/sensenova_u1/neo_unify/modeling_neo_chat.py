@@ -1,3 +1,4 @@
+from shared.utils.phase_progress import text_encoding_progress, set_phase_status
 from typing import List, Optional, Tuple, Union
 import math
 import os
@@ -28,10 +29,6 @@ def _take_tensor(tensor_list):
     return tensor
 
 
-def _transpose_contiguous_disposable(tensor_list, dim0, dim1):
-    return _take_tensor(tensor_list).transpose(dim0, dim1).contiguous()
-
-
 def _contiguous_disposable(tensor_list):
     tensor = _take_tensor(tensor_list)
     return tensor if tensor.is_contiguous() else tensor.contiguous()
@@ -43,70 +40,6 @@ def version_cmp(v1, v2, op='eq'):
     from packaging import version
     op_func = getattr(operator, op)
     return op_func(version.parse(v1), version.parse(v2))
-
-def prepare_flash_kv_cache(
-    past_key_values,
-    current_len: int,
-    batch_size: int,
-):
-    """
-    Convert prefix cache from [B, H, S, D] to flash-attn friendly [B, S, H, D],
-    and preallocate full KV buffer for [prefix + current].
-
-    This is done once before denoising loop.
-    """
-    if past_key_values is None:
-        return
-
-    for layer in past_key_values.layers:
-        if layer.keys is None or layer.values is None:
-            layer.flash_prefix_len = 0
-            layer.flash_total_len = current_len
-            layer.flash_k_cache = None
-            layer.flash_v_cache = None
-            continue
-
-        past_k_list = [layer.keys]
-        layer.keys = None
-        past_k_flash = _transpose_contiguous_disposable(past_k_list, 1, 2)
-        prefix_len = past_k_flash.shape[1]
-        total_len = prefix_len + current_len
-        k_cache = torch.empty(
-            (batch_size, total_len, past_k_flash.shape[2], past_k_flash.shape[3]),
-            device=past_k_flash.device,
-            dtype=past_k_flash.dtype,
-        )
-        k_cache[:, :prefix_len].copy_(past_k_flash)
-        del past_k_flash
-
-        past_v_list = [layer.values]
-        layer.values = None
-        past_v_flash = _transpose_contiguous_disposable(past_v_list, 1, 2)
-        v_cache = torch.empty(
-            (batch_size, total_len, past_v_flash.shape[2], past_v_flash.shape[3]),
-            device=past_v_flash.device,
-            dtype=past_v_flash.dtype,
-        )
-        v_cache[:, :prefix_len].copy_(past_v_flash)
-        del past_v_flash
-
-        layer.flash_prefix_len = prefix_len
-        layer.flash_total_len = total_len
-        layer.flash_k_cache = k_cache
-        layer.flash_v_cache = v_cache
-
-def clear_flash_kv_cache(past_key_values):
-    if past_key_values is None:
-        return
-    for layer in past_key_values.layers:
-        if hasattr(layer, "flash_prefix_len"):
-            delattr(layer, "flash_prefix_len")
-        if hasattr(layer, "flash_total_len"):
-            delattr(layer, "flash_total_len")
-        if hasattr(layer, "flash_k_cache"):
-            delattr(layer, "flash_k_cache")
-        if hasattr(layer, "flash_v_cache"):
-            delattr(layer, "flash_v_cache")
 
 def optimized_scale(positive_flat, negative_flat):
     # Force the divisor computation to float32 regardless of the surrounding
@@ -175,7 +108,7 @@ class NEOChatModel(PreTrainedModel):
         "Qwen3DecoderLayer",
         "Qwen3MoeDecoderLayer",
     ]
-    _denoise_offload_module_paths = (
+    _offload_separate_blocks = (  # mmgp loads them only while they run: the prompt's embedding and the thinking text's head, not while denoising
         "language_model.model.embed_tokens",
         "language_model.lm_head",
     )
@@ -527,27 +460,29 @@ class NEOChatModel(PreTrainedModel):
         return torch.stack([t_image, h_image, w_image], dim=0)
     
     def _t2i_prefix_forward(self, input_ids, indexes, attention_mask):
-        out = self.language_model.model(
-            input_ids=input_ids,
-            indexes=indexes,
-            attention_mask=attention_mask,
-            use_cache=True,
-        )
-        result = (out.past_key_values, out.last_hidden_state.device, out.last_hidden_state.dtype)
-        del out
-        return result
+        with text_encoding_progress(self.language_model.model.layers):
+            out = self.language_model.model(
+                input_ids=input_ids,
+                indexes=indexes,
+                attention_mask=attention_mask,
+                use_cache=True,
+            )
+            result = (out.past_key_values, out.last_hidden_state.device, out.last_hidden_state.dtype)
+            del out
+            return result
 
     def _it2i_prefix_forward(self, input_embeds_list, indexes, attention_mask, gen_indicators=None):
-        out = self.language_model.model(
-            inputs_embeds_list=input_embeds_list,
-            indexes=indexes,
-            attention_mask=attention_mask,
-            use_cache=True,
-            image_gen_indicators=gen_indicators.view(1, -1) if gen_indicators is not None else None
-        )
-        result = (out.past_key_values, out.last_hidden_state.device, out.last_hidden_state.dtype)
-        del out
-        return result
+        with text_encoding_progress(self.language_model.model.layers):
+            out = self.language_model.model(
+                inputs_embeds_list=input_embeds_list,
+                indexes=indexes,
+                attention_mask=attention_mask,
+                use_cache=True,
+                image_gen_indicators=gen_indicators.view(1, -1) if gen_indicators is not None else None
+            )
+            result = (out.past_key_values, out.last_hidden_state.device, out.last_hidden_state.dtype)
+            del out
+            return result
 
     def _think_prefix_forward(self, **kwargs):
         """Build the Think prefix cache without materialising per-token logits."""
@@ -935,22 +870,6 @@ class NEOChatModel(PreTrainedModel):
                 attention_mask_text_uncondition = {"full_attention": None}
                 attention_mask_img_uncondition = {"full_attention": None}
 
-                prepare_flash_kv_cache(
-                    past_key_values_cond_cfg,
-                    current_len=token_h * token_w,
-                    batch_size=1,
-                )
-                prepare_flash_kv_cache(
-                    past_key_values_tu_cfg,
-                    current_len=token_h * token_w,
-                    batch_size=1,
-                )
-                prepare_flash_kv_cache(
-                    past_key_values_iu_cfg,
-                    current_len=token_h * token_w,
-                    batch_size=1,
-                )
-
                 timesteps = torch.linspace(0.0, 1.0, num_steps+1, device=device)
                 if enable_timestep_shift:
                     timesteps = self._apply_time_schedule(timesteps, token_h*token_w, timestep_shift)
@@ -1014,9 +933,6 @@ class NEOChatModel(PreTrainedModel):
 
                 generated_images.append(image_prediction)
 
-                clear_flash_kv_cache(past_key_values_cond_cfg)
-                clear_flash_kv_cache(past_key_values_tu_cfg)
-                clear_flash_kv_cache(past_key_values_iu_cfg)
 
                 if gt_images is not None and img_count < len(gt_images):
                     gt_img_pil = gt_images[img_count]
@@ -1275,22 +1191,6 @@ class NEOChatModel(PreTrainedModel):
                 attention_mask_text_uncondition = {"full_attention": None}
                 attention_mask_img_uncondition = {"full_attention": None}
 
-                prepare_flash_kv_cache(
-                    past_key_values_cond_cfg,
-                    current_len=token_h * token_w,
-                    batch_size=1,
-                )
-                prepare_flash_kv_cache(
-                    past_key_values_tu_cfg,
-                    current_len=token_h * token_w,
-                    batch_size=1,
-                )
-                prepare_flash_kv_cache(
-                    past_key_values_iu_cfg,
-                    current_len=token_h * token_w,
-                    batch_size=1,
-                )
-
                 timesteps = torch.linspace(0.0, 1.0, num_steps+1, device=device)
                 if enable_timestep_shift:
                     timesteps = self._apply_time_schedule(timesteps, token_h*token_w, timestep_shift)
@@ -1354,9 +1254,6 @@ class NEOChatModel(PreTrainedModel):
 
                 generated_images.append(image_prediction)
 
-                clear_flash_kv_cache(past_key_values_cond_cfg)
-                clear_flash_kv_cache(past_key_values_tu_cfg)
-                clear_flash_kv_cache(past_key_values_iu_cfg)
 
                 img_count += 1
 
@@ -1421,7 +1318,7 @@ class NEOChatModel(PreTrainedModel):
         return generated_text, generated_images
 
     @torch.no_grad()
-    def it2i_generate(self, tokenizer, prompt, images, cfg_scale=1, img_cfg_scale=1, cfg_norm='none', enable_timestep_shift=True, timestep_shift=1, image_size=(256, 256), num_steps=30, IMG_START_TOKEN='<img>', IMG_END_TOKEN='</img>', IMG_CONTEXT_TOKEN='<IMG_CONTEXT>', method='euler', cfg_interval=(0, 1), batch_size=1, t_eps=0.02, think_mode=False, seed=0, use_kv_cache=False, callback=None):
+    def it2i_generate(self, tokenizer, prompt, images, cfg_scale=1, img_cfg_scale=1, cfg_norm='none', enable_timestep_shift=True, timestep_shift=1, image_size=(256, 256), num_steps=30, IMG_START_TOKEN='<img>', IMG_END_TOKEN='</img>', IMG_CONTEXT_TOKEN='<IMG_CONTEXT>', method='euler', cfg_interval=(0, 1), batch_size=1, t_eps=0.02, think_mode=False, seed=0, callback=None):
         assert cfg_norm in ['none', 'global', 'channel']
         self._notify_layer_offload_phase("prefix")
 
@@ -1559,6 +1456,7 @@ class NEOChatModel(PreTrainedModel):
             del indexes_img_condition, attention_mask_img_condition_prefix
         if past_key_values_uncondition is not None:
             del indexes_uncondition, attention_mask_uncondition_prefix
+        set_phase_status("Preparing Denoising")
         self._notify_layer_offload_phase("denoise")
 
         for layer_idx in range(len(past_key_values_condition.layers)):
@@ -1582,17 +1480,6 @@ class NEOChatModel(PreTrainedModel):
                 past_key_values_uncondition.layers[layer_idx].values = past_key_values_uncondition.layers[layer_idx].values.expand(
                     batch_size, *past_key_values_uncondition.layers[layer_idx].values.shape[1:]
                 )
-
-        if use_kv_cache:
-            prepare_flash_kv_cache(
-                past_key_values_condition,
-                current_len=token_h * token_w,
-                batch_size=batch_size,
-            )
-            if past_key_values_img_condition is not None:
-                prepare_flash_kv_cache(past_key_values_img_condition, current_len=token_h * token_w, batch_size=batch_size)
-            if past_key_values_uncondition is not None:
-                prepare_flash_kv_cache(past_key_values_uncondition, current_len=token_h * token_w, batch_size=batch_size)
 
         grid_h = image_size[1] // self.patch_size
         grid_w = image_size[0] // self.patch_size
@@ -1618,6 +1505,9 @@ class NEOChatModel(PreTrainedModel):
         timesteps = torch.linspace(0.0, 1.0, num_steps + 1, device=device)
         if enable_timestep_shift:
             timesteps = self._apply_time_schedule(timesteps, token_h * token_w, timestep_shift)
+
+        if callback is not None:
+            callback(-1, None)
 
         for step_i in tqdm(range(num_steps), total=num_steps, desc="SenseNova-U1 denoising"):
             t = timesteps[step_i]
@@ -1716,19 +1606,13 @@ class NEOChatModel(PreTrainedModel):
             if callback is not None:
                 callback(step_i, image_prediction)
 
-        clear_flash_kv_cache(past_key_values_condition)
-        if past_key_values_img_condition is not None:
-            clear_flash_kv_cache(past_key_values_img_condition)
-        if past_key_values_uncondition is not None:
-            clear_flash_kv_cache(past_key_values_uncondition)
-
         self.last_think_content = think_text
         if think_mode:
             return image_prediction, think_text
         return image_prediction
 
     @torch.no_grad()
-    def t2i_generate(self, tokenizer, prompt, cfg_scale=1, timestep_shift=1, enable_timestep_shift=True, cfg_norm='none', image_size=(256, 256), num_steps=30, IMG_START_TOKEN='<img>', IMG_END_TOKEN='</img>', IMG_CONTEXT_TOKEN='<IMG_CONTEXT>', method='euler', cfg_interval=(0, 1), batch_size=1, t_eps=0.02, think_mode=False, seed=0, use_kv_cache=False, callback=None):
+    def t2i_generate(self, tokenizer, prompt, cfg_scale=1, timestep_shift=1, enable_timestep_shift=True, cfg_norm='none', image_size=(256, 256), num_steps=30, IMG_START_TOKEN='<img>', IMG_END_TOKEN='</img>', IMG_CONTEXT_TOKEN='<IMG_CONTEXT>', method='euler', cfg_interval=(0, 1), batch_size=1, t_eps=0.02, think_mode=False, seed=0, callback=None):
         assert self.concat_time_token_num == 0
         assert cfg_norm in ['cfg_zero_star', 'global', 'none', 'channel']
         self._notify_layer_offload_phase("prefix")
@@ -1792,6 +1676,7 @@ class NEOChatModel(PreTrainedModel):
         del input_ids_condition, indexes_condition, attention_mask_condition_prefix
         if input_ids_uncondition is not None:
             del input_ids_uncondition, indexes_uncondition, attention_mask_uncondition_prefix
+        set_phase_status("Preparing Denoising")
         self._notify_layer_offload_phase("denoise")
 
         for layer_idx in range(len(past_key_values_condition.layers)):
@@ -1800,11 +1685,6 @@ class NEOChatModel(PreTrainedModel):
             if past_key_values_uncondition is not None:
                 past_key_values_uncondition.layers[layer_idx].keys = past_key_values_uncondition.layers[layer_idx].keys.expand(batch_size, *past_key_values_uncondition.layers[layer_idx].keys.shape[1:])
                 past_key_values_uncondition.layers[layer_idx].values = past_key_values_uncondition.layers[layer_idx].values.expand(batch_size, *past_key_values_uncondition.layers[layer_idx].values.shape[1:])
-
-        if use_kv_cache:
-            prepare_flash_kv_cache(past_key_values_condition, current_len=token_h * token_w, batch_size=batch_size)
-            if past_key_values_uncondition is not None:
-                prepare_flash_kv_cache(past_key_values_uncondition, current_len=token_h * token_w, batch_size=batch_size)
 
         # init noise image tokens
         grid_h = image_size[1] // self.patch_size
@@ -1828,6 +1708,9 @@ class NEOChatModel(PreTrainedModel):
         timesteps = torch.linspace(0.0, 1.0, num_steps+1, device=device)
         if enable_timestep_shift:
             timesteps = self._apply_time_schedule(timesteps, token_h*token_w, timestep_shift)
+
+        if callback is not None:
+            callback(-1, None)
 
         for step_i in tqdm(range(num_steps), total=num_steps, desc="SenseNova-U1 denoising"):
             t = timesteps[step_i]
@@ -1903,10 +1786,6 @@ class NEOChatModel(PreTrainedModel):
             image_prediction = self.unpatchify_list(z_list, self.patch_size * merge_size, image_size[1], image_size[0])
             if callback is not None:
                 callback(step_i, image_prediction)
-
-        clear_flash_kv_cache(past_key_values_condition)
-        if past_key_values_uncondition is not None:
-            clear_flash_kv_cache(past_key_values_uncondition)
 
         self.last_think_content = think_text
         if think_mode:

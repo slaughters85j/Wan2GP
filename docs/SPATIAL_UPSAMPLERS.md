@@ -8,6 +8,14 @@ parsing, validation helpers, config nesting, downloads and dispatch.
 
 ## Upsampler types
 
+**MiniMax H3 VAE** is available in Spatial Upsampling during H3 video or image
+generation. It replaces the default VAE and handles VAE decoding and upsampling
+together. Choose **×2** to double the output width and height, **×1.5** to
+enlarge them by half, or **×1** to keep the original size. ×1 and ×1.5 are
+downscaled from the ×2 decoding. **VAE Upscaling** (Wan, Qwen and Krea image
+generation) offers the same three choices. When a video continues a Source
+Video, the source frames are resized to the output size.
+
 - `postprocessing`: works on decoded frames. Interchangeable: WanGP can call any of
   them through the same `upscale()` interface, both at generation time and in
   **late post processing** (Post Processing tab on existing media). Image-only
@@ -67,6 +75,7 @@ class MyUpsampler:
     def validate_upsampling(self, value, image_mode): ...  # -> "" or error text
     # postprocessing type only:
     def upscale(self, sample, value, *, seed, ..., abort_callback, progress_callback): ...
+    # progress_callback(phase, current=None, total=None, unit=None): unit (e.g. "tiles") labels the counter, default "steps"
     def download(self, process_files, send_cmd=None, status_text=None, spatial_upsampling=None): ...
     def load_upsampler(self, value, **kwargs): ...            # optional pre-dispatch load hook
     def supports_loaded_model(self, value, context, **kwargs): ... # optional core-model borrowing
@@ -83,6 +92,7 @@ class MyUpsampler:
     def model_load_upsampling_value(self, value, model_type, model_def, image_mode): ...
     def loaded_model_vae_upsampling_value(self, model): ...
     def model_load_kwargs_for_vae_upsampling(self, value, model_type, model_def, image_mode): ...
+    def post_model_process_vae_upsampling(self, sample, value): ...  # optional: final output size, applied right after decoding
     # optional Configuration tab integration:
     def default_config(self): ...                          # -> dict
     def legacy_config(self, server_config): ...            # -> old top-level values, if any
@@ -98,8 +108,10 @@ Discovery evaluates the historical `enabled()` method first: `True` maps to
 optional `status` property. Discovery always emits `enabled`, `disabled`, or
 `unknown`; `unknown` means neither mechanism supplied a valid status.
 `reason_disabled` is included only when the normalized status is `disabled` and
-the handler provides a non-empty reason. Deepy includes these fields for every
-discovered process and will not dispatch a process reported as disabled.
+the handler provides a non-empty reason. This describes the internal catalog;
+Prime's post-processing toolbox omits disabled processors from callable
+discovery. Internal/compatibility views may include them for diagnostics,
+but a process reported as disabled cannot be dispatched.
 
 `SimpleScaleSuffixMixin` provides `is_upsampling`/`split_value`/`build_value` for the
 common `<method>*<multiplier>` value encoding (e.g. `lanczos*2`, `coz*4`). Its
@@ -163,6 +175,16 @@ gallery item, and `media_flow` exposes scalar controls for the currently selecte
 Media Flow spatial process. A parameter can still be inferred and passed by
 WanGP when it is absent from a UI context; H3, for example, receives generation
 prompt/reference data without showing redundant controls during generation.
+
+The two persisted generic slider slots are `spatial_upsampler_param` and
+`spatial_upsampler_param2`. A refiner declares zero, one or both in its
+`method_parameters`, with its own labels, limits, steps and defaults. Unset slot
+values resolve to that method's defaults. Method selection updates the slider
+metadata and resets these slots to the newly selected method's defaults.
+
+Use `label` for the short gallery label and optional `label_long` for a generation
+label with brief guidance. Declare `description` and optional `method_descriptions`
+on the processor so the UI can explain which choice suits the user's input.
 
 Supported generic UI components are `textbox`, `number`, `slider`, `dropdown`,
 `checkbox`, and `images`. Image parameters are rendered by
@@ -241,6 +263,33 @@ as the default. The values are read at the start of every native or Media Flow
 upscale. Audio remains under the existing WGP and Media Flow preservation paths;
 the LTX spatial upsampler itself only returns video frames.
 
+The same handler also exposes **LTX 2.5 Detail Refiner** (`ltx25_refine`, x1,
+x1.5 or x2) with the Refine Details IC-LoRA on the LTX 2.5 distilled checkpoint.
+The source is Lanczos-resized to the target size, padded to multiples of 32 and
+by eight frames, and refined from a canvas that is split into overlapping
+1024x576 tiles (576x1024 for portrait) and 97-frame temporal windows. Every
+denoising step evaluates each tile with its own crop of a freshly encoded
+reference window and fuses the tile predictions with Gaussian weights
+(`shared/utils/tiled_fusion.py`), so tiles share one trajectory and no seams form.
+Gentle mode (default) starts from the encoded source at sigma 0.909 with three
+steps; full mode starts from noise with the eight distilled steps. The
+`refiner_window_size` (49 to 121 frames, default 97), `refiner_gentle` and
+`refiner_tiles_per_call` (0 = automatic from free VRAM, or 1 to 16 tiles per
+transformer call; the output does not depend on it) options live under
+`spatial_upsamplers.ltx2`. The canvas, its blend buffer and the window
+references move to system RAM when they would need more than 10 % of free VRAM.
+In Media Flow each refiner chunk returns its refined overlap frames, re-encoded
+as a short clip, through the continue cache; the next chunk starts from them at
+half conditioning strength, and the process handler's `overlap_output_split()`
+tells Media Flow to keep the previous chunk's frames in the overlap instead of
+crossfading. The re-encoded last written overlap frames a resumed run needs are
+kept in a `.ltx25_refine_cache.safetensors` sidecar; data whose start frame or
+mode does not match the chunk is ignored. The x2
+methods and the refiner share one private model; switching between them only
+swaps LoRAs. Outputs are limited to a 4320p short side; a larger request fails
+before denoising with the largest multiplier that fits. Its progress counts
+tiles, text-encoder layers and VAE tiles with their units.
+
 Model persistence is a registry-wide setting stored at
 `wgp_config["spatial_upsamplers"]["persistence"]`; handlers must not expose a
 separate persistence control in their own config section. The registry retains
@@ -284,3 +333,7 @@ offload_registry.unregister_offloadobj("MyUpsampler", offloadobj)  # in release_
 This lets WanGP track every extension offload object and release all extension
 resources centrally: the toolbar "Unload Models" tool (and the Configuration plugin
 release button) calls `offload_registry.release_all()`.
+
+---
+
+> Applies to: Developing spatial upsampler/refiner plugins: handlers, registration and shared configuration. Installed processing options are available through WanGP's post-processing controls and API.

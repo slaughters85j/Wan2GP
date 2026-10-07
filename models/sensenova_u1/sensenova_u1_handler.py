@@ -1,4 +1,3 @@
-import os
 
 import torch
 from PIL import Image
@@ -11,7 +10,6 @@ _ARCHITECTURE = "sensenova_u1_5_8b_mot"
 _PROJECT_REPO = "DeepBeepMeep/SenseNova"
 _PROJECT_FOLDER = "sensenova_u1_5"
 _PROFILE_FOLDER = _ARCHITECTURE
-_KV_CACHE_SETTING = "sensenova_kv_cache"
 
 SENSENOVA_INFOS = """## SenseNova-U1.5
 
@@ -24,7 +22,6 @@ SenseNova-U1.5 is a unified model for text-to-image generation and image editing
 - **Resolution:** `2048x2048` is a good general-purpose choice. Native 4K improves space for detail and typography but requires substantially more time and memory. WanGP keeps both dimensions aligned to the model's 32-pixel image grid.
 - **Reference mode:** the default treats the first image as the main subject or landscape and derives output dimensions from it. Select **Use Reference Images** instead when every image is an ordinary reference and the chosen output resolution should be kept.
 - **Reference quality:** use clean, high-resolution source images when possible. WanGP sends multiple references in their displayed order, so describe each image's role in the prompt.
-- **KV Cache:** leave it **Disabled** when memory is limited or when generating large images such as 4K; generation will take longer but is more likely to fit. Choose **Enabled** when you have ample memory and want faster generation. This setting does not change image quality.
 
 ### Current Limitations
 
@@ -77,6 +74,8 @@ class family_handler:
     def query_model_def(base_model_type, model_def):
         return {
             "image_outputs": True,
+            "device_explicit": True,
+            "dtype": "bf16",
             "no_negative_prompt": True,
             "no_background_removal": True,
             "guidance_max_phases": 1,
@@ -96,6 +95,7 @@ class family_handler:
             "at_least_one_image_ref_needed": False,
             "image_prompt_types_allowed": "S",
             "infos": SENSENOVA_INFOS,
+            "specialities": [{"name": "infographics", "aliases": ["information graphics", "information posters"]}, {"name": "text rendering", "description": "Chinese and English lettering within images."}, {"name": "precise layouts"}],
             "prompt_infos": SENSENOVA_PROMPT_INFOS,
             "preview_all_images": True,
             "prompt_enhancer_button_label": "Enhance",
@@ -103,9 +103,9 @@ class family_handler:
                 "selection": ["T", "TI", "T1", "TI1"],
                 "labels": {
                     "T": "A General Image Prompt using existing Text Prompt",
-                    "TI": "A General Image Prompt using existing Text Prompt and First Reference Image",
+                    "TI": "A General Image Prompt using existing Text Prompt and {image_inputs}",
                     "T1": "An Infographic Prompt using existing Text Prompt",
-                    "TI1": "An Infographic Prompt using existing Text Prompt and First Reference Image",
+                    "TI1": "An Infographic Prompt using existing Text Prompt and {image_inputs}",
                 },
                 "default": "",
             },
@@ -117,18 +117,6 @@ class family_handler:
             "image_prompt_enhancer_max_tokens": 1024,
             "text_prompt_enhancer_max_tokens1": 1536,
             "image_prompt_enhancer_max_tokens1": 1536,
-            "custom_settings": [{
-                "id": _KV_CACHE_SETTING,
-                "name": "KV Cache",
-                "label": "KV Cache",
-                "type": "dropdown",
-                "default": "Disabled",
-                "choices": [
-                    ("Disabled (Slower but lower VRAM/RAM)", "Disabled"),
-                    ("Enabled (Faster but requires more VRAM/RAM)", "Enabled"),
-                ],
-                "info": "Disabled retains only compact prompt/reference K/V and builds the active layer's attention workspace on demand. Enabled preallocates full per-layer K/V buffers for faster denoising.",
-            }],
             "profiles_dir": [_PROFILE_FOLDER],
             "resolutions_categories": ["<=4096p"],
             "skip_prompt_template": True,
@@ -152,17 +140,8 @@ class family_handler:
         return {"sensenova": (1160, "SenseNova")}
 
     @staticmethod
-    def register_lora_cli_args(parser, lora_root):
-        parser.add_argument(
-            "--lora-dir-sensenova-u1",
-            type=str,
-            default=None,
-            help=f"Path to SenseNova-U1 LoRAs (default: {os.path.join(lora_root, _PROFILE_FOLDER)}).",
-        )
-
-    @staticmethod
-    def get_lora_dir(base_model_type, args, lora_root):
-        return getattr(args, "lora_dir_sensenova_u1", None) or os.path.join(lora_root, _PROFILE_FOLDER)
+    def get_lora_dir(base_model_type):
+        return _PROFILE_FOLDER
 
     @staticmethod
     def preview_latents(base_model_type, latents, meta):
