@@ -16,6 +16,7 @@ Source / To Control Video chains.
 
 from __future__ import annotations
 
+import html
 import os
 import time
 from dataclasses import dataclass
@@ -28,7 +29,6 @@ from shared.utils.gallery_push import push_to_top_gallery
 
 
 PAGE_SIZE = 10
-PROMPT_PREVIEW_CHARS = 260
 STAR_ON = "★"
 STAR_OFF = "☆"
 DELETE_LABEL = "Delete"
@@ -122,10 +122,11 @@ def _fmt_prompt(settings: Optional[dict]) -> str:
     p = settings.get("prompt")
     if not isinstance(p, str) or not p.strip():
         return "_(no prompt)_"
-    p = p.strip()
-    if len(p) > PROMPT_PREVIEW_CHARS:
-        p = p[:PROMPT_PREVIEW_CHARS].rstrip() + "…"
-    return p
+    # Full prompt, shown literally: escape it so structured prompts keep their
+    # <Subject 1>/<Audio 1> tags instead of the Markdown cell eating them as HTML,
+    # and keep it on one source line (<br> for breaks) so Markdown leaves it alone.
+    text = "<br>".join(html.escape(p.strip()).splitlines())
+    return f"<div class='wgp-history-prompt-text'>{text}</div>"
 
 
 def _fmt_meta(settings: Optional[dict], path: str, exists: bool, *, is_latest: bool = False) -> str:
