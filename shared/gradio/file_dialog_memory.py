@@ -1,4 +1,4 @@
-"""Separate "last used folder" memory for audio and image/video file dialogs.
+"""Separate "last used folder" memory for audio, Continue Video and image/video file dialogs.
 
 A plain ``<input type="file">`` dialog opens wherever the browser last left off,
 one shared folder for every upload on every page, and a web page cannot choose
@@ -15,6 +15,10 @@ LAN IP — falls through to the browser's normal dialog unchanged.
 
 AUDIO_PICKER_ID = "wangp-audio"
 MEDIA_PICKER_ID = "wangp-media"
+CONTINUE_VIDEO_PICKER_ID = "wangp-continue-video"
+# The Continue Video input shares elem_id "video_input" with Control Video, so it is
+# recognised by its label, which wgp.py always starts with this text.
+CONTINUE_VIDEO_LABEL = "Video to Continue"
 
 
 def get_javascript() -> str:
@@ -47,13 +51,19 @@ def get_javascript() -> str:
             return kinds;
         }
 
+        function isContinueVideo(input) {
+            const block = input.closest(".block");
+            const label = block && block.querySelector("[data-testid='block-label'], [data-testid='block-info'], label");
+            return !!label && label.textContent.trim().startsWith("__CONTINUE_LABEL__");
+        }
+
         function pickerIdFor(input) {
             if (input.type !== "file" || input.webkitdirectory) return null;
             const kinds = parseAccept(input);
             const insideAudio = !!input.closest("[data-testid='audio'], .gradio-audio");
             if (kinds.audio.size && !kinds.image.size && !kinds.video.size) return "AUDIO_ID";
             if (insideAudio && !kinds.image.size && !kinds.video.size) return "AUDIO_ID";
-            if ((kinds.image.size || kinds.video.size) && !kinds.audio.size) return "MEDIA_ID";
+            if ((kinds.image.size || kinds.video.size) && !kinds.audio.size) return isContinueVideo(input) ? "CONTINUE_ID" : "MEDIA_ID";
             return null;  // mixed, untyped or other files: leave the native dialog alone
         }
 
@@ -82,20 +92,21 @@ def get_javascript() -> str:
             input.dispatchEvent(new Event("change", { bubbles: true }));
         }
 
+        const PICKER_IDS = { AUDIO_ID: "__AUDIO__", MEDIA_ID: "__MEDIA__", CONTINUE_ID: "__CONTINUE__" };
         const nativeClick = HTMLInputElement.prototype.click;
         HTMLInputElement.prototype.click = function () {
             const id = pickerIdFor(this);
             if (!id) return nativeClick.call(this);
-            openWithMemory(this, id === "AUDIO_ID" ? "__AUDIO__" : "__MEDIA__");
+            openWithMemory(this, PICKER_IDS[id]);
         };
         const nativeShowPicker = HTMLInputElement.prototype.showPicker;
         if (typeof nativeShowPicker === "function") {
             HTMLInputElement.prototype.showPicker = function () {
                 const id = pickerIdFor(this);
                 if (!id) return nativeShowPicker.call(this);
-                openWithMemory(this, id === "AUDIO_ID" ? "__AUDIO__" : "__MEDIA__");
+                openWithMemory(this, PICKER_IDS[id]);
             };
         }
-        console.log("[WanGP] separate last-folder memory for audio and image/video dialogs is active");
+        console.log("[WanGP] separate last-folder memory for audio, Continue Video and image/video dialogs is active");
     })();
-    """.replace("__AUDIO__", AUDIO_PICKER_ID).replace("__MEDIA__", MEDIA_PICKER_ID)
+    """.replace("__AUDIO__", AUDIO_PICKER_ID).replace("__MEDIA__", MEDIA_PICKER_ID).replace("__CONTINUE_LABEL__", CONTINUE_VIDEO_LABEL).replace("__CONTINUE__", CONTINUE_VIDEO_PICKER_ID)
