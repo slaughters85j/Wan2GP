@@ -59,6 +59,7 @@ from datetime import datetime
 import gradio as gr
 from shared.gradio import downloads as gradio_downloads
 from shared.gradio import cheat_sheet as _cheat_sheet
+from shared.gradio import file_dialog_memory as _file_dialog_memory
 from shared.gradio.progress import WangpProgress
 from shared.gradio import gradio_event_context_patch, gradio_model_switch_patch, gradio_queue_focus_patch, gradio_startup_patch, video_preview
 from gradio.themes.utils.sizes import Size
@@ -14153,6 +14154,7 @@ def create_ui():
     js += model_output_filter.get_javascript()
     js += model_selector_toolbar.get_javascript()
     js += finetune_editor.get_javascript()
+    js += _file_dialog_memory.get_javascript()  # separate last folder for audio vs image/video file dialogs
     AudioGallery.install_gradio_upload_mtime_patch()
     app.initialize_plugins(globals())
     plugin_js = ""
