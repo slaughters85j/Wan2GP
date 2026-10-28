@@ -241,8 +241,14 @@ def snapshot_entries(audio: bool = False) -> list[dict[str, Any]]:
         return out
 
 
+def _recording_disabled() -> bool:
+    """Callers that keep their own encrypted records (e.g. AI Storyboarding) set
+    WANGP_NO_HISTORY=1 so prompts are not copied into this plaintext sidecar."""
+    return os.environ.get("WANGP_NO_HISTORY") == "1"
+
+
 def append_entry(path: str, settings: Any, *, audio: bool = False) -> None:
-    if not isinstance(path, str) or not path:
+    if not isinstance(path, str) or not path or _recording_disabled():
         return
     target_norm = _norm(path)
     with _lock:
@@ -263,7 +269,7 @@ def append_entry(path: str, settings: Any, *, audio: bool = False) -> None:
 
 def replace_last_entry(new_path: str, new_settings: Any, *, audio: bool = False) -> None:
     """Used when a sliding-window output replaces the previous last file."""
-    if not isinstance(new_path, str) or not new_path:
+    if not isinstance(new_path, str) or not new_path or _recording_disabled():
         return
     with _lock:
         try:
